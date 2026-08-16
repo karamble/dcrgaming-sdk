@@ -1,0 +1,7 @@
+*.test
+*.out
+.claude/
+.cursor/
+.vscode/
+.idea/
+.DS_Store
