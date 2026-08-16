@@ -27,36 +27,9 @@ import (
 	"github.com/karamble/dcrgaming-sdk/pkg/gamelog"
 )
 
-// Version is the game protocol version, carried as gv in the envelope and
-// separate from the framing version.
-//
-// The dealing frames - card key, shuffle, leaving - must carry the signature of
-// the seat they name, and a peer refuses one without it. There is deliberately no
-// mode that accepts unsigned frames, because such a mode is the hole itself, held
-// open by a flag somebody forgets. Peers on different versions therefore do not
-// play together, which is the intended behaviour rather than something to work
-// around.
-//
-// 3 changes the table bond: a claim no longer takes it but moves it into a claimed
-// bond, where its owner has a window to answer with its own key. The bond script
-// loses its claim branch, so its address changes, and a bond posted under an
-// earlier version is a bond under earlier rules.
-//
-// 4 adds audit on challenge: any seat may demand a settled hand be recomputed
-// from every seat's deck secrets, and refusing to reveal is answered by the
-// claim. A peer on 3 cannot be asked to reveal, so the two do not play together.
-//
-// 5 adds the card-key possession proof and the shuffle dispute. A card key now
-// carries a Schnorr proof that its announcer knows its discrete log, folded
-// into the signed digest - a key without one is refused, so 4 and 5 do not
-// play together. And a signed shuffle that fails verification can be disputed
-// with a complaint that carries everything a verdict needs; every peer judges
-// it identically, the hand is void, and the table settles at the last signed
-// boundary without unanimity.
-const Version = 5
-
-// Game is the routing key for poker traffic.
-const Game = "poker"
+// A game's identity - its routing key and protocol version - belongs to the
+// game, not to this schema. Encode and Decode take the version as a value, and
+// the transport introduces the game from its configuration.
 
 // Kind identifies a message. It is a string so an unknown one reads as itself
 // in a log rather than as a number nobody can place.

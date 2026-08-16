@@ -38,11 +38,11 @@ func TestACheckpointSurvivesTheWireAndStillVerifies(t *testing.T) {
 		t.Fatalf("checkpoint: %v", err)
 	}
 
-	blob, err := Encode(Version, KindCheckpoint, cpMatch, CheckpointFrom(cp))
+	blob, err := Encode(5, KindCheckpoint, cpMatch, CheckpointFrom(cp))
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	msg, err := Decode(Version, blob)
+	msg, err := Decode(5, blob)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -138,11 +138,11 @@ func TestAClaimIsCheckedForShapeOnly(t *testing.T) {
 	}
 
 	// It crosses the wire like anything else.
-	blob, err := Encode(Version, KindClaim, cpMatch, good)
+	blob, err := Encode(5, KindClaim, cpMatch, good)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	msg, err := Decode(Version, blob)
+	msg, err := Decode(5, blob)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}

@@ -23,7 +23,7 @@ func TestTheEncodedEnvelopeIsPinned(t *testing.T) {
 		t.Fatalf("the pinned envelope hashes to %s, want %s, so this test's own literals disagree", got, wantSHA)
 	}
 
-	blob, err := Encode(Version, KindCommit, "b7c8d9e0f1a20314", Commit{
+	blob, err := Encode(5, KindCommit, "b7c8d9e0f1a20314", Commit{
 		Roster: "5f00d1e2c3b4a5968778695a4b3c2d1e0f1e2d3c4b5a69788796a5b4c3d2e1f0",
 		Signer: "02b1c2d3e4f5061728394a5b6c7d8e9fa0b1c2d3e4f5061728394a5b6c7d8e9fa0",
 		Sig:    "3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b",

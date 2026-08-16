@@ -47,8 +47,8 @@ func newRouter(t *testing.T, send *fakeSender, allow func(sid, sender string) bo
 	t.Helper()
 	var mu sync.Mutex
 	r, err := NewRouter(Config{
-		Game:      schema.Game,
-		GameVer:   schema.Version,
+		Game:      "poker",
+		GameVer:   5,
 		Sender:    send,
 		Authorize: allow,
 		Handle: func(d Delivery) {
@@ -112,7 +112,7 @@ func TestUnauthorizedSenderAllocatesNothing(t *testing.T) {
 
 	// A chunked message, so a part would create reassembly state if it were
 	// admitted at all.
-	parts, err := wire.Encode(schema.Game, schema.Version, testSID,
+	parts, err := wire.Encode("poker", 5, testSID,
 		[]byte(`{"v":1,"kind":"action","match":"t","body":{}}`), time.Time{}, 8)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
@@ -161,11 +161,11 @@ func TestChunkedMessageReassemblesOutOfOrder(t *testing.T) {
 	r := newRouter(t, send, allowAll, &got)
 
 	body := schema.Resync{After: 7}
-	payload, err := schema.Encode(schema.Version, schema.KindResync, testMatch, body)
+	payload, err := schema.Encode(5, schema.KindResync, testMatch, body)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	parts, err := wire.Encode(schema.Game, schema.Version, testSID, payload, time.Time{}, 16)
+	parts, err := wire.Encode("poker", 5, testSID, payload, time.Time{}, 16)
 	if err != nil {
 		t.Fatalf("frame: %v", err)
 	}
@@ -195,8 +195,8 @@ func TestChunksFromDifferentSendersDoNotMerge(t *testing.T) {
 	var got []Delivery
 	r := newRouter(t, send, allowAll, &got)
 
-	payload, _ := schema.Encode(schema.Version, schema.KindResync, testMatch, schema.Resync{After: 1})
-	parts, _ := wire.Encode(schema.Game, schema.Version, testSID, payload, time.Time{}, 16)
+	payload, _ := schema.Encode(5, schema.KindResync, testMatch, schema.Resync{After: 1})
+	parts, _ := wire.Encode("poker", 5, testSID, payload, time.Time{}, 16)
 
 	// Interleave one sender's first part with another's whole message.
 	r.HandleGCMessage(testGCID, stranger, parts[0], time.Now())
@@ -217,14 +217,14 @@ func TestMissingAuthorizeAllowsNobody(t *testing.T) {
 	send := &fakeSender{}
 	var got []Delivery
 	r, err := NewRouter(Config{
-		Game: schema.Game, GameVer: schema.Version, Sender: send,
+		Game: "poker", GameVer: 5, Sender: send,
 		Handle: func(d Delivery) { got = append(got, d) },
 	})
 	if err != nil {
 		t.Fatalf("new router: %v", err)
 	}
-	payload, _ := schema.Encode(schema.Version, schema.KindResync, testMatch, schema.Resync{After: 1})
-	parts, _ := wire.Encode(schema.Game, schema.Version, testSID, payload, time.Time{}, 0)
+	payload, _ := schema.Encode(5, schema.KindResync, testMatch, schema.Resync{After: 1})
+	parts, _ := wire.Encode("poker", 5, testSID, payload, time.Time{}, 0)
 
 	r.HandleGCMessage(testGCID, alice, parts[0], time.Now())
 	if len(got) != 0 {
@@ -275,8 +275,8 @@ func TestReceiveFeedsTheRouterAndStops(t *testing.T) {
 	send := &fakeSender{}
 	delivered := make(chan Delivery, 1)
 	r, err := NewRouter(Config{
-		Game:      schema.Game,
-		GameVer:   schema.Version,
+		Game:      "poker",
+		GameVer:   5,
 		Sender:    send,
 		Authorize: allowAll,
 		Handle:    func(d Delivery) { delivered <- d },
@@ -285,11 +285,11 @@ func TestReceiveFeedsTheRouterAndStops(t *testing.T) {
 		t.Fatalf("new router: %v", err)
 	}
 
-	payload, _ := schema.Encode(schema.Version, schema.KindResync, testMatch, schema.Resync{After: 3})
-	parts, _ := wire.Encode(schema.Game, schema.Version, testSID, payload, time.Time{}, 0)
+	payload, _ := schema.Encode(5, schema.KindResync, testMatch, schema.Resync{After: 3})
+	parts, _ := wire.Encode("poker", 5, testSID, payload, time.Time{}, 0)
 
 	frames := make(chan InboundFrame, 1)
-	frames <- InboundFrame{Game: schema.Game, GCID: testGCID, From: alice, Frame: parts[0]}
+	frames <- InboundFrame{Game: "poker", GCID: testGCID, From: alice, Frame: parts[0]}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

@@ -31,8 +31,8 @@ func testCreds(t *testing.T, priv *secp256k1.PrivateKey) membership.Credentials 
 
 func testTerms() membership.Terms {
 	return membership.Terms{
-		Game:       Game,
-		GameVer:    Version,
+		Game:       "poker",
+		GameVer:    5,
 		SID:        "0123456789abcdef",
 		BuyInAtoms: 10_000_000,
 		Seats:      2,
@@ -55,11 +55,11 @@ func TestAJoinSurvivesTheWireAndStillVerifies(t *testing.T) {
 		t.Fatalf("sign join: %v", err)
 	}
 
-	blob, err := Encode(Version, KindJoin, "match1", JoinFrom(original))
+	blob, err := Encode(5, KindJoin, "match1", JoinFrom(original))
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	msg, err := Decode(Version, blob)
+	msg, err := Decode(5, blob)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -93,11 +93,11 @@ func TestACommitSurvivesTheWireAndStillVerifies(t *testing.T) {
 		t.Fatalf("sign commit: %v", err)
 	}
 
-	blob, err := Encode(Version, KindCommit, "match1", CommitFrom(original))
+	blob, err := Encode(5, KindCommit, "match1", CommitFrom(original))
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	msg, err := Decode(Version, blob)
+	msg, err := Decode(5, blob)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -136,11 +136,11 @@ func TestARosterCarriesJoinsThatStillVerify(t *testing.T) {
 	}
 
 	seats := map[uint32][]byte{0: joins[0].Key, 1: joins[1].Key}
-	blob, err := Encode(Version, KindRoster, "match1", RosterFrom(terms, seats, joins, nil))
+	blob, err := Encode(5, KindRoster, "match1", RosterFrom(terms, seats, joins, nil))
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	msg, err := Decode(Version, blob)
+	msg, err := Decode(5, blob)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}

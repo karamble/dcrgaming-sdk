@@ -7,7 +7,7 @@ import (
 
 func TestInviteRoundTrips(t *testing.T) {
 	want := Invite{
-		Game: Game, Kind: InviteKindTable,
+		Game: "poker", Kind: InviteKindTable,
 		BuyInAtoms: 10_000_000, Seats: 6, SID: "0123456789abcdef",
 	}
 	link, err := want.String()
@@ -25,7 +25,7 @@ func TestInviteRoundTrips(t *testing.T) {
 
 // An invite with no terms is still an invitation, and must stay renderable.
 func TestInviteWithoutTerms(t *testing.T) {
-	link, err := Invite{Game: Game, Kind: InviteKindTable}.String()
+	link, err := Invite{Game: "poker", Kind: InviteKindTable}.String()
 	if err != nil {
 		t.Fatalf("render: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestInviteWithoutTerms(t *testing.T) {
 func TestInviteRejectsMalformed(t *testing.T) {
 	for name, inv := range map[string]Invite{
 		"no game":        {Kind: InviteKindTable},
-		"no kind":        {Game: Game},
+		"no kind":        {Game: "poker"},
 		"game not a key": {Game: "Poker!", Kind: InviteKindTable},
 	} {
 		if _, err := inv.String(); err == nil {
@@ -70,7 +70,7 @@ func TestInviteRejectsMalformed(t *testing.T) {
 // does not follow stops invitations rendering. This pins the literal.
 func TestInviteLinkShapeIsStable(t *testing.T) {
 	link, err := Invite{
-		Game: Game, Kind: InviteKindTable,
+		Game: "poker", Kind: InviteKindTable,
 		BuyInAtoms: 10_000_000, Seats: 6, SID: "abc123",
 	}.String()
 	if err != nil {

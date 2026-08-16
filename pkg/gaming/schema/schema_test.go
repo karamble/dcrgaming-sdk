@@ -42,15 +42,15 @@ func TestActionRoundTrips(t *testing.T) {
 		t.Fatalf("read transcript: %v", err)
 	}
 
-	msg, err := Encode(Version, KindAction, testMatch, Action{Entry: tr.Entries[0]})
+	msg, err := Encode(5, KindAction, testMatch, Action{Entry: tr.Entries[0]})
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
-	got, err := Decode(Version, msg)
+	got, err := Decode(5, msg)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if got.Kind != KindAction || got.Match != testMatch || got.V != Version {
+	if got.Kind != KindAction || got.Match != testMatch || got.V != 5 {
 		t.Fatalf("message header did not survive: %+v", got)
 	}
 
@@ -67,12 +67,12 @@ func TestActionRoundTrips(t *testing.T) {
 // new message kind would break every existing client.
 func TestUnknownKindDecodesAndIsSkippable(t *testing.T) {
 	raw, err := json.Marshal(Message{
-		V: Version, Kind: "something_new", Match: testMatch, Body: json.RawMessage(`{"x":1}`),
+		V: 5, Kind: "something_new", Match: testMatch, Body: json.RawMessage(`{"x":1}`),
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	m, err := Decode(Version, raw)
+	m, err := Decode(5, raw)
 	if err != nil {
 		t.Fatalf("an unknown kind must still decode: %v", err)
 	}
@@ -89,14 +89,14 @@ func TestDecodeRejectsUnusableMessages(t *testing.T) {
 		"no kind":       `{"v":1,"kind":"","match":"t","body":{}}`,
 	}
 	for name, blob := range cases {
-		if _, err := Decode(Version, []byte(blob)); err == nil {
+		if _, err := Decode(5, []byte(blob)); err == nil {
 			t.Errorf("%s should be refused", name)
 		}
 	}
 }
 
 func TestEncodeRequiresAMatch(t *testing.T) {
-	if _, err := Encode(Version, KindHead, "", Head{}); err == nil {
+	if _, err := Encode(5, KindHead, "", Head{}); err == nil {
 		t.Fatal("a message must name the table it belongs to")
 	}
 }
