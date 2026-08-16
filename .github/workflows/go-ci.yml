@@ -1,0 +1,51 @@
+name: Go CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ '**' ]
+
+jobs:
+  vet-and-format:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Show Go environment
+        run: |
+          go version
+          go env
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Fail if gofmt would change anything
+        run: |
+          unformatted=$(gofmt -s -l .)
+          if [ -n "$unformatted" ]; then
+            echo "Files need 'gofmt -s -w .':" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      # The escrow scripts build on these exact versions; a bump changes
+      # bytes guarding live mainnet bonds. This step is permanent.
+      - name: Fail if the txscript or wire pin moved
+        run: |
+          ts=$(go list -m -f '{{.Version}}' github.com/decred/dcrd/txscript/v4)
+          w=$(go list -m -f '{{.Version}}' github.com/decred/dcrd/wire)
+          if [ "$ts" != "v4.1.1" ] || [ "$w" != "v1.7.0" ]; then
+            echo "Pinned versions moved: txscript/v4 $ts, wire $w" >&2
+            exit 1
+          fi
+
+      - name: Go tests (race, repeated)
+        run: go test -v -race ./... -count=3 -timeout 600s
