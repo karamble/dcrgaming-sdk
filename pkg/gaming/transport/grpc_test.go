@@ -46,9 +46,13 @@ type fakeBridge struct {
 
 	// refuse, if set, is returned by SendFrame.
 	refuse error
+
+	// hello records what the game introduced itself as.
+	hello *gamingpb.HelloRequest
 }
 
-func (f *fakeBridge) Hello(context.Context, *gamingpb.HelloRequest) (*gamingpb.HelloReply, error) {
+func (f *fakeBridge) Hello(_ context.Context, req *gamingpb.HelloRequest) (*gamingpb.HelloReply, error) {
+	f.hello = req
 	return &gamingpb.HelloReply{Game: f.game, Network: f.network}, nil
 }
 
@@ -330,5 +334,67 @@ func serverTLS(cert tls.Certificate, clients *x509.CertPool) *tls.Config {
 		MinVersion:   tls.VersionTLS12,
 		ClientAuth:   tls.RequireAndVerifyClientCert,
 		ClientCAs:    clients,
+	}
+}
+
+// Hello sends the configured identity, not a constant. The fixture's values
+// are deliberately not poker's, so a hardcoded identity cannot pass.
+func TestHelloIntroducesTheConfiguredIdentity(t *testing.T) {
+	serverCert, serverKey := selfSigned(t, "bridge")
+	clientCert, clientKey := selfSigned(t, "game")
+
+	pair, err := tlsPair(serverCert, serverKey)
+	if err != nil {
+		t.Fatalf("load the bridge's pair: %v", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(clientCert) {
+		t.Fatal("the game's certificate did not parse")
+	}
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	f := &fakeBridge{game: "battleships", network: "mainnet"}
+	srv := grpc.NewServer(grpc.Creds(credentials.NewTLS(serverTLS(pair, pool))))
+	gamingpb.RegisterBridgeServiceServer(srv, f)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+
+	c, err := Dial(context.Background(), BridgeConfig{
+		Addr:          lis.Addr().String(),
+		ClientCert:    clientCert,
+		ClientKey:     clientKey,
+		BridgeCert:    serverCert,
+		GameID:        "battleships",
+		GameVer:       9,
+		ClientVersion: "shipyard",
+		Capabilities:  []gamingpb.Capability{gamingpb.Capability_CAP_RECLAIM},
+	})
+	if err != nil {
+		t.Fatalf("dial the bridge: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := c.Hello(ctx, "mainnet"); err != nil {
+		t.Fatalf("hello: %v", err)
+	}
+	if f.hello == nil {
+		t.Fatal("the bridge never received a hello")
+	}
+	if got := f.hello.GetGameId(); got != "battleships" {
+		t.Errorf("hello introduced %q, want the configured id", got)
+	}
+	if got := f.hello.GetGameProtocolVersion(); got != 9 {
+		t.Errorf("hello spoke version %d, want the configured 9", got)
+	}
+	if got := f.hello.GetClientVersion(); got != "shipyard" {
+		t.Errorf("hello named client %q, want the configured one", got)
+	}
+	caps := f.hello.GetCapabilities()
+	if len(caps) != 1 || caps[0] != gamingpb.Capability_CAP_RECLAIM {
+		t.Errorf("hello carried capabilities %v, want the configured single one", caps)
 	}
 }
