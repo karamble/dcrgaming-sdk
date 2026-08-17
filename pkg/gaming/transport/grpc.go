@@ -233,26 +233,41 @@ func (c *Bridge) Hello(ctx context.Context, network string) (*gamingpb.HelloRepl
 // could not be asked". A game that treated the second as a refusal would stop
 // waiting on money that was still going to arrive - which has cost real coin
 // here before.
+// hostMessage carries a person-readable message while keeping the underlying
+// gRPC status reachable, so Unreachable and other code-based callers still work.
+// The rendered text is the message alone; Unwrap exposes the original status.
+type hostMessage struct {
+	msg string
+	err error
+}
+
+func (h *hostMessage) Error() string { return h.msg }
+func (h *hostMessage) Unwrap() error { return h.err }
+
 func hostErr(what string, err error) error {
 	st, ok := status.FromError(err)
 	if !ok {
 		return fmt.Errorf("%s: %w", what, err)
 	}
+	// Wrap the original status rather than only its message, so the code
+	// survives for Unreachable: recording an unreachable bridge as a refusal
+	// once meant a stake was paid twice.
+	msg := func(text string) error { return &hostMessage{msg: what + ": " + text, err: err} }
 	switch st.Code() {
 	case codes.Unimplemented:
 		// The bridge answers this way when it is switched off, when the
 		// credential has been withdrawn, and when it has no gaming in it
 		// at all - deliberately the same answer to all three.
-		return fmt.Errorf("%s: this bridge is not answering; it may be switched off, "+
-			"or this credential may have been revoked", what)
+		return msg("this bridge is not answering; it may be switched off, " +
+			"or this credential may have been revoked")
 	case codes.Unavailable:
-		return fmt.Errorf("%s: the bridge is not reachable right now: %s", what, st.Message())
+		return msg("the bridge is not reachable right now: " + st.Message())
 	case codes.ResourceExhausted:
-		return fmt.Errorf("%s: refused by the spending limit set for this game: %s", what, st.Message())
+		return msg("refused by the spending limit set for this game: " + st.Message())
 	case codes.FailedPrecondition:
-		return fmt.Errorf("%s: %s", what, st.Message())
+		return msg(st.Message())
 	default:
-		return fmt.Errorf("%s: %s", what, st.Message())
+		return msg(st.Message())
 	}
 }
 
