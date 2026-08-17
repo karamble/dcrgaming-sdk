@@ -53,16 +53,17 @@ func ForfeitableBonds(match string, seats, logs, punish map[uint32][]byte,
 		if !ok {
 			return nil, fmt.Errorf("seat %d has no log key", seat)
 		}
+		// Only compressed encodings: the degenerate skip compares announcement
+		// bytes, and an uncompressed alias must not slip past it into a refusal.
+		if len(lb) != 33 {
+			return nil, fmt.Errorf("seat %d log key is %d bytes, want 33", seat, len(lb))
+		}
 		lp, err := secp256k1.ParsePubKey(lb)
 		if err != nil {
 			return nil, fmt.Errorf("seat %d log key: %w", seat, err)
 		}
-		pb, ok := punish[seat]
-		if !ok {
+		if _, ok := punish[seat]; !ok {
 			return nil, fmt.Errorf("seat %d has no punishment key", seat)
-		}
-		if _, err := secp256k1.ParsePubKey(pb); err != nil {
-			return nil, fmt.Errorf("seat %d punishment key: %w", seat, err)
 		}
 		logPubs[seat] = lp
 		members = append(members, key)
@@ -88,15 +89,19 @@ func ForfeitableBonds(match string, seats, logs, punish map[uint32][]byte,
 			if opp == seat {
 				continue
 			}
-			// The two announcements ForfeitKey refuses; that opponent gets
-			// no branch here rather than stopping the whole table.
+			// Announcements ForfeitKey would refuse - wrong shape, off curve,
+			// degenerate; that opponent gets no branch here rather than
+			// stopping the whole table with two published bytes.
 			lb, pb := logs[seat], punish[opp]
+			if len(pb) != 33 {
+				continue
+			}
 			if bytes.Equal(lb, pb) || (lb[0] != pb[0] && bytes.Equal(lb[1:], pb[1:])) {
 				continue
 			}
 			punishPub, err := secp256k1.ParsePubKey(pb)
 			if err != nil {
-				return nil, fmt.Errorf("seat %d punishment key: %w", opp, err)
+				continue
 			}
 			fkey, err := forfeit.ForfeitKey(forfeit.Branch{Match: match, Seat: member},
 				logPubs[seat], punishPub)

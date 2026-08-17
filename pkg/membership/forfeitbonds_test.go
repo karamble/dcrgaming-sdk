@@ -267,3 +267,68 @@ func TestForfeitableBondsRefuseBadRosters(t *testing.T) {
 		})
 	}
 }
+
+// A malformed announcement - wrong length, off curve, or a compressed key
+// wearing an uncompressed coat - is two published bytes with no secret, and
+// must cost that seat its branch, never the table. An uncompressed alias of a
+// degenerate key must not slip past the byte-level skip into a refusal.
+func TestAMalformedAnnouncementLosesItsBranch(t *testing.T) {
+	uncompress := func(t *testing.T, compressed []byte) []byte {
+		t.Helper()
+		pub, err := secp256k1.ParsePubKey(compressed)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		return pub.SerializeUncompressed()
+	}
+
+	for name, announce := range map[string]func(t *testing.T, logs map[uint32][]byte) []byte{
+		"uncompressed key": func(t *testing.T, _ map[uint32][]byte) []byte {
+			priv, err := secp256k1.GeneratePrivateKey()
+			if err != nil {
+				t.Fatalf("generate: %v", err)
+			}
+			return priv.PubKey().SerializeUncompressed()
+		},
+		"uncompressed negated log key": func(t *testing.T, logs map[uint32][]byte) []byte {
+			neg := append([]byte(nil), logs[0]...)
+			neg[0] ^= 0x01
+			return uncompress(t, neg)
+		},
+		"two bytes": func(*testing.T, map[uint32][]byte) []byte { return []byte{0x02, 0x7f} },
+		"empty":     func(*testing.T, map[uint32][]byte) []byte { return nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			seats, logs, punish := forfeitRoster(t, 3)
+			punish[2] = announce(t, logs)
+			bonds, err := ForfeitableBonds(forfeitMatch, seats, logs, punish, forfeitLock, testParams())
+			if err != nil {
+				t.Fatalf("the table must survive a malformed announcement: %v", err)
+			}
+			for _, b := range bonds {
+				script, err := hex.DecodeString(b.ScriptHex)
+				if err != nil {
+					t.Fatalf("decode: %v", err)
+				}
+				terms, err := escrow.ParseForfeitableBond(script)
+				if err != nil {
+					t.Fatalf("parse: %v", err)
+				}
+				want := 2
+				if b.Seat == 0 || b.Seat == 1 {
+					want = 1
+				}
+				if got := len(terms.Forfeit); got != want {
+					t.Fatalf("seat %d kept %d branches, want %d", b.Seat, got, want)
+				}
+			}
+		})
+	}
+
+	// Heads-up there is no remaining branch, so the build still refuses.
+	seats, logs, punish := forfeitRoster(t, 2)
+	punish[1] = uncompress(t, logs[0])
+	if _, err := ForfeitableBonds(forfeitMatch, seats, logs, punish, forfeitLock, testParams()); err == nil {
+		t.Fatal("built a heads-up bond from a malformed announcement")
+	}
+}
