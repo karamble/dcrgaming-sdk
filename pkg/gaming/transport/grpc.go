@@ -56,6 +56,12 @@ type BridgeConfig struct {
 	ClientVersion string
 	Capabilities  []gamingpb.Capability
 
+	// MinRefundBlocks and BondLockBlocks are this game's money-lock terms, told
+	// to the bridge so it can mint an invite the game will accept and disclose
+	// the durations before a person pays. Zero means the game has no preference.
+	MinRefundBlocks uint32
+	BondLockBlocks  uint32
+
 	// Log, if set, records connection trouble. Nothing here is fatal, so
 	// without it a game reconnecting in a loop does so silently.
 	Log slog.Logger
@@ -214,6 +220,8 @@ func (c *Bridge) Hello(ctx context.Context, network string) (*gamingpb.HelloRepl
 		GameProtocolVersion: uint32(c.cfg.GameVer),
 		ClientVersion:       c.cfg.ClientVersion,
 		Capabilities:        c.cfg.Capabilities,
+		MinRefundBlocks:     c.cfg.MinRefundBlocks,
+		BondLockBlocks:      c.cfg.BondLockBlocks,
 	})
 	if err != nil {
 		return nil, hostErr("introduce this game", err)

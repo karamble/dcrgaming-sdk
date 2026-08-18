@@ -366,10 +366,12 @@ func TestHelloIntroducesTheConfiguredIdentity(t *testing.T) {
 		ClientCert:    clientCert,
 		ClientKey:     clientKey,
 		BridgeCert:    serverCert,
-		GameID:        "battleships",
-		GameVer:       9,
-		ClientVersion: "shipyard",
-		Capabilities:  []gamingpb.Capability{gamingpb.Capability_CAP_RECLAIM},
+		GameID:          "battleships",
+		GameVer:         9,
+		ClientVersion:   "shipyard",
+		Capabilities:    []gamingpb.Capability{gamingpb.Capability_CAP_RECLAIM},
+		MinRefundBlocks: 2048,
+		BondLockBlocks:  4096,
 	})
 	if err != nil {
 		t.Fatalf("dial the bridge: %v", err)
@@ -396,5 +398,11 @@ func TestHelloIntroducesTheConfiguredIdentity(t *testing.T) {
 	caps := f.hello.GetCapabilities()
 	if len(caps) != 1 || caps[0] != gamingpb.Capability_CAP_RECLAIM {
 		t.Errorf("hello carried capabilities %v, want the configured single one", caps)
+	}
+	if got := f.hello.GetMinRefundBlocks(); got != 2048 {
+		t.Errorf("hello advertised min_refund_blocks %d, want the configured 2048", got)
+	}
+	if got := f.hello.GetBondLockBlocks(); got != 4096 {
+		t.Errorf("hello advertised bond_lock_blocks %d, want the configured 4096", got)
 	}
 }
