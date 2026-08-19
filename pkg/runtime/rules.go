@@ -87,7 +87,7 @@ type Message struct {
 	GCID  string
 	// From is the sender's authenticated identity, taken from the channel
 	// and the envelope and never from anything inside the body.
-	From []byte
+	From string
 	// Kind is the game's own word for what this message is.
 	Kind schema.Kind
 	// Body is what the game encoded. The runtime has not read it.
