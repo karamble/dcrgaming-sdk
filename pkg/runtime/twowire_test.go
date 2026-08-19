@@ -3,6 +3,8 @@ package runtime
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/connect"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/transport"
+	"github.com/karamble/dcrgaming-sdk/pkg/gaming/wire"
 	"github.com/karamble/dcrgaming-sdk/pkg/identity"
 	"github.com/karamble/dcrgaming-sdk/pkg/membership"
 	"github.com/karamble/dcrgaming-sdk/pkg/spend"
@@ -1050,4 +1053,138 @@ func releaseSent(rt *Runtime, sid string) bool {
 	}
 	rel, held := t.releases[mine]
 	return held && rel.done
+}
+
+// A game's own message crosses between two peers, and the runtime's do not.
+//
+// Handle is only half a contract. A game that can hear its opponent and not
+// answer cannot be played, and until there was a way to send one no game had
+// ever been hosted here to notice.
+func TestAGamesOwnMessageCrossesAndTheRuntimesCannotBeForged(t *testing.T) {
+	fake := bridgetest.New(bridgetest.Options{
+		Game: "battleships", Network: "mainnet",
+		Params: chaincfg.TestNet3Params(), Height: 800,
+	})
+	srv, err := fake.Serve("seat0", "seat1")
+	if err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	heard := make(chan Message, 8)
+	one := wireSeat(t, ctx, srv, "seat0")
+	two := wireSeatListening(t, ctx, srv, "seat1", heard)
+	go func() { _ = one.Run(ctx) }()
+	go func() { _ = two.Run(ctx) }()
+	waitFor(t, "both seats subscribed", func() bool { return fake.Subscribers() == 2 })
+
+	link := invite(t, nil)
+	sid, err := accept(one, link, testGCID)
+	if err != nil {
+		t.Fatalf("first seat accepting: %v", err)
+	}
+	if _, err := accept(two, link, testGCID); err != nil {
+		t.Fatalf("second seat accepting: %v", err)
+	}
+	waitFor(t, "both sides seated", func() bool {
+		fake.Mine(1)
+		one.Tick(ctx, fake.Height())
+		two.Tick(ctx, fake.Height())
+		_, a := one.Seats(sid)
+		_, b := two.Seats(sid)
+		return a && b
+	})
+
+	if err := one.Send(ctx, sid, "shoot", map[string]any{"x": 3, "y": 4}, wire.ClassTurn); err != nil {
+		t.Fatalf("send a shot: %v", err)
+	}
+	select {
+	case got := <-heard:
+		if got.Kind != "shoot" {
+			t.Fatalf("the other side heard a %q", got.Kind)
+		}
+		if got.Match != sid {
+			t.Fatalf("it arrived for table %q", got.Match)
+		}
+		var body struct{ X, Y int }
+		if err := json.Unmarshal(got.Body, &body); err != nil {
+			t.Fatalf("the body did not survive: %v", err)
+		}
+		if body.X != 3 || body.Y != 4 {
+			t.Fatalf("the shot arrived as %d,%d", body.X, body.Y)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the other side never heard it")
+	}
+
+	// A message with no kind is not a message; the router would frame an
+	// envelope nothing can dispatch.
+	if err := one.Send(ctx, sid, "   ", map[string]any{}, wire.ClassTurn); err == nil {
+		t.Error("a message with no kind was sent")
+	}
+
+	// And the runtime's own are not the game's to send. A game that could
+	// forge a settlement could arrange the money differently.
+	for _, kind := range []schema.Kind{
+		schema.KindJoin, schema.KindCommit, schema.KindSettle,
+		KindRoster, KindFunded, KindBonded, KindPayout, KindRelease,
+		KindAccusation, KindPunishKey, KindResync, KindResyncReply,
+	} {
+		err := one.Send(ctx, sid, kind, map[string]any{}, wire.ClassTurn)
+		if err == nil {
+			t.Errorf("a game was allowed to send %q", kind)
+			continue
+		}
+		if !strings.Contains(err.Error(), "not a game's to send") {
+			t.Errorf("%s refused for the wrong reason: %v", kind, err)
+		}
+	}
+}
+
+// listeningRules is a game that keeps what it hears.
+type listeningRules struct {
+	*battleshipsRules
+	heard chan Message
+}
+
+func (l *listeningRules) Handle(_ context.Context, in Message) error {
+	select {
+	case l.heard <- in:
+	default:
+	}
+	return nil
+}
+
+// wireSeatListening is wireSeat with a game that reports what reaches it.
+func wireSeatListening(t *testing.T, ctx context.Context, srv *bridgetest.Server,
+	seat string, heard chan Message) *Runtime {
+
+	t.Helper()
+	g := &listeningRules{battleshipsRules: &battleshipsRules{}, heard: heard}
+	conn, err := srv.Dial(ctx, seat, func(cfg *transport.BridgeConfig) { connect.Stamp(cfg, g.Identity()) })
+	if err != nil {
+		t.Fatalf("dial as %s: %v", seat, err)
+	}
+	book, err := spend.OpenBook(spend.MemStore())
+	if err != nil {
+		t.Fatalf("book: %v", err)
+	}
+	seed, err := identity.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	if err := seed.SetBondDeposit(bondFor(seat)); err != nil {
+		t.Fatalf("bond deposit: %v", err)
+	}
+	rt, err := New(Config{
+		Rules: g, Bridge: conn, Book: book, Tables: NewMemTableStore(),
+		Identity: seed, SeatTags: testTags, Params: chaincfg.TestNet3Params(),
+		PunishTag: []byte("testgame/punishkey/v1"),
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	return rt
 }

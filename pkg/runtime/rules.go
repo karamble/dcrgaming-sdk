@@ -35,9 +35,12 @@ package runtime
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/connect"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
+	"github.com/karamble/dcrgaming-sdk/pkg/gaming/wire"
 	"github.com/karamble/dcrgaming-sdk/pkg/membership"
 )
 
@@ -125,4 +128,35 @@ type Seated interface {
 // settlement has been broadcast, which is when the money is decided.
 type Settled interface {
 	Settled(ctx context.Context, match string, txid string)
+}
+
+// Send puts one of the game's own messages on the table.
+//
+// The other half of [Rules.Handle], and the whole of how a game speaks: the
+// runtime frames it, chunks it, addresses it to the table's group chat and
+// signs nothing, because the body is the game's and the runtime has not looked
+// inside it.
+//
+// The class is the game's to choose because only the game knows how long one
+// of its messages is worth delivering. A move in a hand is worthless once the
+// hand has moved on; a piece of evidence has to outlive the window it is
+// argued in. See [wire.Class].
+//
+// A game cannot send the runtime's own messages. Joins, commits, rosters,
+// stakes, payouts, settlements, releases and accusations are how the money is
+// arranged, and a game that could forge one could arrange it differently -
+// which is why the runtime keeps them rather than offering them.
+func (r *Runtime) Send(ctx context.Context, match string, kind schema.Kind, body any, class wire.Class) error {
+	if r.ours(kind) {
+		return fmt.Errorf(
+			"%q is one of the runtime's own messages and is not a game's to send", kind)
+	}
+	if strings.TrimSpace(string(kind)) == "" {
+		return fmt.Errorf("a message needs a kind")
+	}
+	t, err := r.tableOf(match)
+	if err != nil {
+		return err
+	}
+	return r.router.Send(ctx, t.gCID(), t.match, t.match, kind, body, class)
 }
