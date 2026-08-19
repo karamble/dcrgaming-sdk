@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/decred/dcrd/txscript/v4/stdaddr"
 	"github.com/decred/slog"
 
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/transport"
@@ -34,6 +35,9 @@ type Config struct {
 	// Identity is the game's seed, from which every seat key is derived.
 	// Required.
 	Identity *identity.Identity
+	// Params is the chain the game is playing on. Required: every script
+	// and address is built against it.
+	Params stdaddr.AddressParams
 	// SeatTags are the game's own domain-separation tags for those keys.
 	// Required, and the game's to state: they are frozen hash inputs that
 	// decide which keys a seat has, so the SDK must not invent them.
@@ -52,10 +56,21 @@ type Runtime struct {
 	book     *spend.Book
 	identity *identity.Identity
 	seatTags identity.SeatTags
+	params   stdaddr.AddressParams
+	router   *transport.Router
 	log      slog.Logger
 
+	// sweepMu guards what this process has broadcast a spend of. Its own
+	// lock because it is consulted from the reclaim path while the table
+	// lock is not held.
+	sweepMu  sync.Mutex
+	sweeping map[string]bool
+
+	// runCtx is the context Run was given, so a message the router delivers
+	// carries the same lifetime as the loop that fetched it.
+	runCtx context.Context
+
 	mu     sync.Mutex
-	router *transport.Router
 	tables map[string]*table
 	payout string
 	names  map[string]string
@@ -84,6 +99,9 @@ func New(cfg Config) (*Runtime, error) {
 	if cfg.Identity == nil {
 		return nil, fmt.Errorf("a runtime needs the game's identity to derive seat keys from")
 	}
+	if cfg.Params == nil {
+		return nil, fmt.Errorf("a runtime needs the chain it is playing on")
+	}
 	if cfg.SeatTags.Session == "" || cfg.SeatTags.Log == "" || cfg.SeatTags.Bond == "" {
 		return nil, fmt.Errorf("a runtime needs the game's three seat-key tags; they are frozen inputs and the SDK must not invent them")
 	}
@@ -94,12 +112,46 @@ func New(cfg Config) (*Runtime, error) {
 	if log == nil {
 		log = slog.Disabled
 	}
-	return &Runtime{
+	r := &Runtime{
 		rules: cfg.Rules, bridge: cfg.Bridge, book: cfg.Book, log: log,
-		identity: cfg.Identity, seatTags: cfg.SeatTags,
+		identity: cfg.Identity, seatTags: cfg.SeatTags, params: cfg.Params,
 		tables: map[string]*table{},
 		names:  map[string]string{},
-	}, nil
+		runCtx: context.Background(),
+	}
+	// Built here rather than when Run starts, so a game that acts before the
+	// loop is up finds a router instead of a race.
+	id := cfg.Rules.Identity()
+	router, err := transport.NewRouter(transport.Config{
+		Game:    id.GameID,
+		GameVer: int(id.GameVer),
+		Sender:  cfg.Bridge,
+		Log:     log,
+		// A sender may allocate state for a table this game is at, and no
+		// other. See Runtime.authorized for why the sender itself is not
+		// checked here.
+		Authorize: r.authorized,
+		Handle:    r.deliver,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build the router: %w", err)
+	}
+	r.router = router
+	return r, nil
+}
+
+// deliver hands one decoded message to the game.
+//
+// The runtime does not look inside a body and does not retry: a redelivered
+// move is a replayed move, so a game that wants one has to ask.
+func (r *Runtime) deliver(d transport.Delivery) {
+	msg := Message{Match: d.SID, GCID: d.GCID, From: d.Sender}
+	if d.Msg != nil {
+		msg.Kind, msg.Body = d.Msg.Kind, d.Msg.Body
+	}
+	if err := r.rules.Handle(r.runCtx, msg); err != nil {
+		r.log.Warnf("the game refused a %s message: %v", msg.Kind, err)
+	}
 }
 
 // Run owns the loop until the context ends.
@@ -108,6 +160,7 @@ func New(cfg Config) (*Runtime, error) {
 // this game. Both stop when the context does, and Run returns the first error
 // that is not simply the context ending.
 func (r *Runtime) Run(ctx context.Context) error {
+	r.runCtx = ctx
 	frames, err := r.bridge.Events(ctx)
 	if err != nil {
 		return fmt.Errorf("subscribe to the bridge: %w", err)
@@ -131,34 +184,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 // tested in transport and wire, and it is exactly the kind of thing that looks
 // simple until a chunked message arrives out of order.
 func (r *Runtime) route(ctx context.Context, frames <-chan transport.InboundFrame) error {
-	id := r.rules.Identity()
-	router, err := transport.NewRouter(transport.Config{
-		Game:    id.GameID,
-		GameVer: int(id.GameVer),
-		Sender:  r.bridge,
-		Log:     r.log,
-		// A sender may talk to a table once they are on its roster. Before
-		// a table has formed nobody is authorised, which is what stops a
-		// stranger allocating state at a table they are not in.
-		Authorize: r.authorized,
-		Handle: func(d transport.Delivery) {
-			msg := Message{Match: d.SID, GCID: d.GCID, From: d.Sender}
-			if d.Msg != nil {
-				msg.Kind, msg.Body = d.Msg.Kind, d.Msg.Body
-			}
-			if err := r.rules.Handle(ctx, msg); err != nil {
-				r.log.Warnf("the game refused a %s message: %v", msg.Kind, err)
-			}
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("build the router: %w", err)
-	}
-	r.mu.Lock()
-	r.router = router
-	r.mu.Unlock()
-
-	transport.Receive(ctx, frames, router)
+	transport.Receive(ctx, frames, r.router)
 	return ctx.Err()
 }
 

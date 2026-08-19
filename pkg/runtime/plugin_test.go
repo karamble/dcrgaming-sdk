@@ -51,12 +51,12 @@ func stand(t *testing.T, g Rules) (*bridgetest.Bridge, *Runtime, context.CancelF
 		t.Fatalf("identity: %v", err)
 	}
 	// A join binds to its bond, so a seat must have one before it can join.
-	if err := seed.SetBondDeposit("aa11bb22:0"); err != nil {
+	if err := seed.SetBondDeposit(bondOutpoint); err != nil {
 		t.Fatalf("bond deposit: %v", err)
 	}
 	rt, err := New(Config{
 		Rules: g, Bridge: conn, Book: book,
-		Identity: seed, SeatTags: testTags,
+		Identity: seed, SeatTags: testTags, Params: chaincfg.TestNet3Params(),
 	})
 	if err != nil {
 		t.Fatalf("new: %v", err)
@@ -83,7 +83,7 @@ func TestARuntimeNeedsAGameABridgeAndSomewhereToWriteMoneyDown(t *testing.T) {
 	}
 	full := func(mut func(*Config)) Config {
 		c := Config{Rules: &trivialGame{}, Bridge: &transport.Bridge{}, Book: book,
-			Identity: seed, SeatTags: testTags}
+			Identity: seed, SeatTags: testTags, Params: chaincfg.TestNet3Params()}
 		mut(&c)
 		return c
 	}
@@ -151,7 +151,7 @@ func TestAFourMethodGameAnswersAllFiveControlRequests(t *testing.T) {
 		{"reclaim", &gamingpb.BridgeRequest{
 			RequestId: "r5",
 			Req: &gamingpb.BridgeRequest_Reclaim{
-				Reclaim: &gamingpb.Reclaim{Kind: gamingpb.Reclaim_BOND, Sid: "s", DestAddr: "TsHome"},
+				Reclaim: &gamingpb.Reclaim{Kind: gamingpb.Reclaim_STAKE, Sid: "abcdef01", DestAddr: payTo(t)},
 			}}, false},
 	} {
 		reply := &gamingpb.RespondRequest{RequestId: tc.req.GetRequestId()}
@@ -286,7 +286,7 @@ func TestEveryRequestIsAnsweredEvenWhenItFails(t *testing.T) {
 	rt.answer(ctx, &gamingpb.BridgeRequest{
 		RequestId: "fail1",
 		Req: &gamingpb.BridgeRequest_Reclaim{
-			Reclaim: &gamingpb.Reclaim{Kind: gamingpb.Reclaim_BOND, Sid: "s", DestAddr: "TsHome"},
+			Reclaim: &gamingpb.Reclaim{Kind: gamingpb.Reclaim_STAKE, Sid: "abcdef01", DestAddr: payTo(t)},
 		},
 	})
 	rt.answer(ctx, &gamingpb.BridgeRequest{RequestId: "unknown1"})

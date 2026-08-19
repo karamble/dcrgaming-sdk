@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+
 	"github.com/karamble/dcrgaming-sdk/pkg/escrow"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/gamingpb"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
@@ -144,10 +146,20 @@ func (r *Runtime) termsFor(inv schema.Invite) (membership.Terms, error) {
 // inconvenience: a seat whose join did not name a bond would be a seat with
 // nothing to forfeit, which is the whole thing bonds are for.
 func (r *Runtime) seatCredentials(terms membership.Terms) (membership.Credentials, error) {
-	creds, err := r.identity.Credentials(r.seatTags, terms.SID)
+	session, logKey, err := r.seatKeys(terms.SID)
 	if err != nil {
-		return membership.Credentials{}, fmt.Errorf("derive this seat's keys: %w", err)
+		return membership.Credentials{}, err
 	}
+	// The bond key is derived WITHOUT the session id, and that is not an
+	// oversight. identity.BondDeposit is one outpoint per identity, so the
+	// key that opens it has to be one key per identity too. Deriving it per
+	// table would build a script the stored deposit was never paid into, and
+	// the join would bind to a bond nobody could spend.
+	bond, err := r.identity.DeriveKey(r.seatTags.Bond, "")
+	if err != nil {
+		return membership.Credentials{}, fmt.Errorf("derive this seat's bond key: %w", err)
+	}
+	creds := membership.Credentials{Session: session, Log: logKey, Bond: bond}
 	outpoint := r.identity.BondDeposit()
 	if strings.TrimSpace(outpoint) == "" {
 		return membership.Credentials{}, fmt.Errorf(
@@ -168,6 +180,18 @@ func (r *Runtime) seatCredentials(terms membership.Terms) (membership.Credential
 	return creds, nil
 }
 
+// seatKeys derives the two per-table keys. The bond is not among them; see
+// seatCredentials.
+func (r *Runtime) seatKeys(sid string) (session, logKey *secp256k1.PrivateKey, err error) {
+	if session, err = r.identity.DeriveKey(r.seatTags.Session, sid); err != nil {
+		return nil, nil, fmt.Errorf("derive this seat's session key: %w", err)
+	}
+	if logKey, err = r.identity.DeriveKey(r.seatTags.Log, sid); err != nil {
+		return nil, nil, fmt.Errorf("derive this seat's log key: %w", err)
+	}
+	return session, logKey, nil
+}
+
 // publishJoin announces this seat's claim to the table.
 func (r *Runtime) publishJoin(ctx context.Context, match string) error {
 	r.mu.Lock()
@@ -185,16 +209,10 @@ func (r *Runtime) publishJoin(ctx context.Context, match string) error {
 
 // send puts one message to a table's group chat.
 func (r *Runtime) send(ctx context.Context, t *table, kind schema.Kind, body any) error {
-	r.mu.Lock()
-	router := r.router
-	r.mu.Unlock()
-	if router == nil {
-		return fmt.Errorf("the runtime is not routing yet; call Run first")
-	}
 	// ClassForm, because formation traffic has to outlive a relay backlog:
 	// a join queued behind one and expiring in transit forms one table and
 	// aborts the other.
-	return router.Send(ctx, t.gCID(), t.match, t.match, kind, body, wire.ClassForm)
+	return r.router.Send(ctx, t.gCID(), t.match, t.match, kind, body, wire.ClassForm)
 }
 
 func (t *table) gCID() string { return t.gcID }
