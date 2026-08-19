@@ -18,8 +18,23 @@ a dcrpulse gaming bridge. The referee, the cards and everything else that
 knows the rules of a particular game stays with that game -
 [dcrpoker](https://github.com/vctt94/dcrpoker) is the first consumer.
 
+Building a game on it? Start with
+**[docs/building-a-game.md](docs/building-a-game.md)** - what you write, what you
+do not, and the one failure mode that costs money.
+
 ## Reading it
 
+- `pkg/runtime` - the lifecycle a game plugs into. It owns the loop; a game
+  implements four methods and never writes a bridge dispatcher, a spend book or
+  a seating machine.
+- `pkg/spend` - the record of money in flight, and the state machine that keeps
+  "could not ask" apart from "the answer was no".
+- `pkg/ruling` - how a game hands the runtime a forfeiture it can check.
+- `pkg/punish` and `pkg/evidence` - carrying a forfeiture out: the bond ladder,
+  the sweep, the release and the equivocation store.
+- `pkg/gaming/connect` - a game's connection to a bridge, headless.
+- `pkg/gaming/bridgetest` - a bridge that exists only in your process, with the
+  failures a game has to survive.
 - `pkg/escrow` - the money: multisig escrow scripts, addresses and bond
   proofs of possession.
 - `pkg/forfeit` - why cheating publishes your key: aggregated forfeit keys
@@ -57,6 +72,14 @@ The warts below are deliberate; every one is load-bearing under live coin.
 - `schema.Game` and `schema.Version` remain poker's values pending the
   identity follow-up; a second game introduces itself through the transport
   and schema configuration instead.
+- `schema.Duty` and `schema.DutyKind` are poker's vocabulary too - cardkey,
+  shuffle, share, action, checkpoint, reveal, indexed by hand - and so is half
+  of `forfeit.Domain`. Another game names its duties itself; `ruling.Silent`
+  carries an opaque label for exactly this reason.
+- `identity.Credentials` derives all three seat keys per session id, but
+  `identity.BondDeposit` is one outpoint per identity. Pair them and the bond
+  key opens nothing. `pkg/runtime` derives the bond key with no session id, the
+  way dcrpoker does; a direct caller has to do the same.
 - Nothing in the schema package, tests included, may import a game's
   driver: once a driver imports schema, that is an import cycle.
 - `escrow.MaxMembers = 6` is an escrow-script fact inherited by every game.
