@@ -3,6 +3,13 @@
 **Epic**: [dcrgaming-runtime.prd.md](../../dcrgaming-runtime.prd.md) ·
 **Architecture**: [dcrgaming-runtime.architecture.md](../../dcrgaming-runtime.architecture.md)
 
+> **Status 2026-08-19.** T-01 to T-12 and T-15 are done. T-13 and T-14 are
+> partial and their decision notes say exactly how. Two tickets were added that
+> the original breakdown missed - **T-16 funding** and **T-18 settlement
+> co-signing** - both now done. One stage remains: forfeiture *execution*, which
+> needs a punishment-key exchange nobody scoped. See
+> `docs/decisions/` and the status table in `docs/building-a-game.md`.
+
 ## Epic summary
 
 Move the money and lifecycle runtime into `dcrgaming-sdk` so a finished game adds dcrgaming
