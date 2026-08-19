@@ -256,3 +256,122 @@ func TestAReleaseThisPeerWouldNotHaveBuiltIsRefused(t *testing.T) {
 		t.Fatal("a refused release was filed anyway")
 	}
 }
+
+// placeTableBond puts another seat's table bond on the chain, which is what a
+// release of it needs to exist.
+func placeTableBond(t *testing.T, rt *Runtime, sid string, seat uint32) {
+	t.Helper()
+	if _, err := rt.tableBondOf(rt.tables[sid], seat); err != nil {
+		t.Fatalf("seat %d's bond: %v", seat, err)
+	}
+	txid := strings.Repeat("c3", 32)
+	rt.mu.Lock()
+	tbl := rt.tables[sid]
+	if tbl.tableBondFunded == nil {
+		tbl.tableBondFunded = map[uint32]staked{}
+	}
+	tbl.tableBondFunded[seat] = staked{outpoint: txid + ":0", atoms: int64(escrow.MinBondAtoms)}
+	rt.mu.Unlock()
+}
+
+// withholding is a game that refuses to co-sign for one named seat.
+type withholding struct {
+	battleshipsRules
+	against uint32
+}
+
+func (w *withholding) WillCoSign(_ string, seat uint32) bool { return seat != w.against }
+
+// A game can punish by refusing to sign, which is the only punishment some
+// rulings have. The other seat's release is not co-signed and nothing is built.
+func TestAGameCanWithholdASeatsRelease(t *testing.T) {
+	fake, rt, _ := stand(t, &withholding{against: 1})
+	sid, them := readyToRelease(t, rt, fake)
+
+	// Their bond, their release, and this peer is asked to co-sign it.
+	theirSeat, _ := them.form.OurSeat()
+	if theirSeat != 1 {
+		t.Fatalf("this test names seat 1 and the other seat is %d", theirSeat)
+	}
+	placeTableBond(t, rt, sid, theirSeat)
+	draft, err := rt.releaseDraft(rt.tables[sid], theirSeat)
+	if err != nil {
+		t.Fatalf("their draft: %v", err)
+	}
+	tx, err := punish.BuildRelease(draft)
+	if err != nil {
+		t.Fatalf("build their release: %v", err)
+	}
+	sig, err := escrow.SignBondSpend(tx, draft.Bond, them.creds.Session)
+	if err != nil {
+		t.Fatalf("their signature: %v", err)
+	}
+	raw, err := tx.Bytes()
+	if err != nil {
+		t.Fatalf("serialise: %v", err)
+	}
+	seats, _ := them.form.Seats()
+	err = rt.adoptRelease(context.Background(), sid, schema.Release{
+		Seat: theirSeat, Tx: hex.EncodeToString(raw),
+		Signer: hex.EncodeToString(seats[theirSeat]), Sig: hex.EncodeToString(sig),
+	})
+	if err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+
+	rt.mu.Lock()
+	held := rt.tables[sid].releases[theirSeat]
+	mine, _ := rt.tables[sid].form.OurSeat()
+	ourKey := hex.EncodeToString(seats[mine])
+	_, signed := held.sigs[ourKey]
+	sent := held.done
+	rt.mu.Unlock()
+	if signed {
+		t.Fatal("this peer co-signed a release the game was withholding")
+	}
+	if sent {
+		t.Fatal("a withheld release went out")
+	}
+}
+
+// The same peer signs for a seat the game has not named, so withholding is a
+// refusal about one seat and not a table that has stopped working.
+func TestWithholdingOneSeatDoesNotStopTheOthers(t *testing.T) {
+	fake, rt, _ := stand(t, &withholding{against: 9})
+	sid, them := readyToRelease(t, rt, fake)
+
+	theirSeat, _ := them.form.OurSeat()
+	placeTableBond(t, rt, sid, theirSeat)
+	draft, err := rt.releaseDraft(rt.tables[sid], theirSeat)
+	if err != nil {
+		t.Fatalf("their draft: %v", err)
+	}
+	tx, err := punish.BuildRelease(draft)
+	if err != nil {
+		t.Fatalf("build their release: %v", err)
+	}
+	sig, err := escrow.SignBondSpend(tx, draft.Bond, them.creds.Session)
+	if err != nil {
+		t.Fatalf("their signature: %v", err)
+	}
+	raw, err := tx.Bytes()
+	if err != nil {
+		t.Fatalf("serialise: %v", err)
+	}
+	seats, _ := them.form.Seats()
+	if err := rt.adoptRelease(context.Background(), sid, schema.Release{
+		Seat: theirSeat, Tx: hex.EncodeToString(raw),
+		Signer: hex.EncodeToString(seats[theirSeat]), Sig: hex.EncodeToString(sig),
+	}); err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+
+	rt.mu.Lock()
+	held := rt.tables[sid].releases[theirSeat]
+	mine, _ := rt.tables[sid].form.OurSeat()
+	_, signed := held.sigs[hex.EncodeToString(seats[mine])]
+	rt.mu.Unlock()
+	if !signed {
+		t.Fatal("a seat the game did not name was not co-signed")
+	}
+}

@@ -227,6 +227,15 @@ func (r *Runtime) adoptRelease(ctx context.Context, match string, body schema.Re
 	// Somebody else's release still needs this seat's signature on it, and
 	// this is the moment to give it: the bond is theirs, it pays only them,
 	// and withholding costs them a wait and gains nothing.
+	//
+	// Unless the game says otherwise. A seat it will not co-sign for is the
+	// one punishment that needs no transaction, and the bond is not stuck by
+	// it - the backstop branch takes it home alone once the lock matures.
+	if body.Seat != mine && !alsoOurs && !r.willCoSign(match, body.Seat) {
+		r.log.Infof("table %s: not co-signing seat %d's release; the game is withholding it",
+			match, body.Seat)
+		return nil
+	}
 	if body.Seat != mine && !alsoOurs {
 		session, _, err := r.seatKeys(t.form.Terms().SID)
 		if err != nil {

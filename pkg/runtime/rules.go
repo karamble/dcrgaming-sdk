@@ -132,6 +132,39 @@ type Settled interface {
 	Settled(ctx context.Context, match string, txid string)
 }
 
+// CoSigning is an optional hook. A game that implements it is asked before this
+// peer adds its signature to a spend that pays another seat.
+//
+// This is how a game says no with money rather than about it. Not every ruling
+// is an instruction: a seat caught cheating, a fault with nobody to name, an
+// accusation answered at every rung - none of those has a transaction to build,
+// and the whole of the answer is that this peer stops co-signing. A game with
+// nothing to say does not implement this and everything is co-signed, which is
+// what happened before the hook existed.
+//
+// Refusing strands nothing. Every pot the runtime builds has a branch its owner
+// can spend alone once its lock matures, so withholding costs the other side a
+// wait and gains the refuser nothing - which is what makes it a safe thing to
+// let a game decide.
+//
+// Called with no runtime lock held, and it must not call back into the runtime.
+type CoSigning interface {
+	// WillCoSign reports whether this peer will sign a spend paying seat at
+	// this table. Asked once per seat for a release, and for every seat at
+	// the table before a payout, because a payout spends all of them.
+	WillCoSign(match string, seat uint32) bool
+}
+
+// willCoSign asks the game about one seat, and answers yes for a game that does
+// not implement the hook.
+func (r *Runtime) willCoSign(match string, seat uint32) bool {
+	ask, ok := r.rules.(CoSigning)
+	if !ok {
+		return true
+	}
+	return ask.WillCoSign(match, seat)
+}
+
 // Send puts one of the game's own messages on the table.
 //
 // The other half of [Rules.Handle], and the whole of how a game speaks: the

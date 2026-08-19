@@ -68,6 +68,16 @@ func (r *Runtime) signAndProposeSettlement(ctx context.Context, match string, tx
 	if !ok {
 		return fmt.Errorf("this table has not seated us")
 	}
+	// A payout spends every seat's stake, so the game is asked about every
+	// seat: one it will not co-sign for holds the whole payout, and each
+	// stake goes home through its own refund branch instead.
+	for seat := range seats {
+		if !r.willCoSign(match, seat) {
+			return fmt.Errorf(
+				"this peer will not sign a payout at table %s while the game is withholding "+
+					"seat %d; the stakes go home through their own refunds instead", match, seat)
+		}
+	}
 	session, _, err := r.seatKeys(t.form.Terms().SID)
 	if err != nil {
 		return err

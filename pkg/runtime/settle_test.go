@@ -430,3 +430,33 @@ func mustSeats(t *testing.T, rt *Runtime, sid string) map[uint32][]byte {
 	}
 	return seats
 }
+
+// A payout spends every seat's stake, so a game withholding any one seat holds
+// the whole thing - and the stakes go home through their own refunds instead.
+func TestAWithheldSeatHoldsTheWholePayout(t *testing.T) {
+	fake, rt, _ := stand(t, &withholding{against: 1})
+	sid, them := seatTwo(t, fake, rt)
+	fundBoth(t, fake, rt, sid, them)
+
+	pot := int64(stakeAtoms * 2)
+	winner := ourSeatOf(t, rt, sid)
+	shares := map[uint32]int64{winner: pot}
+	for seat := range mustSeats(t, rt, sid) {
+		if seat != winner {
+			shares[seat] = 0
+		}
+	}
+	err := rt.Settle(context.Background(), sid, Outcome{Shares: shares})
+	if err == nil {
+		t.Fatal("signed a payout the game was withholding a seat from")
+	}
+	if !strings.Contains(err.Error(), "withholding") {
+		t.Fatalf("refused for the wrong reason: %v", err)
+	}
+	rt.mu.Lock()
+	held := rt.tables[sid].settle
+	rt.mu.Unlock()
+	if held != nil {
+		t.Fatal("a withheld payout was part-signed and kept")
+	}
+}
