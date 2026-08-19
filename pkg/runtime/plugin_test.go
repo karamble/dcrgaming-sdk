@@ -3,7 +3,6 @@ package runtime
 import (
 	"context"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +12,7 @@ import (
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/connect"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/gamingpb"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/transport"
+	"github.com/karamble/dcrgaming-sdk/pkg/identity"
 	"github.com/karamble/dcrgaming-sdk/pkg/ruling"
 	"github.com/karamble/dcrgaming-sdk/pkg/spend"
 )
@@ -46,7 +46,18 @@ func stand(t *testing.T, g Rules) (*bridgetest.Bridge, *Runtime, context.CancelF
 	if err != nil {
 		t.Fatalf("book: %v", err)
 	}
-	rt, err := New(Config{Rules: g, Bridge: conn, Book: book})
+	seed, err := identity.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	// A join binds to its bond, so a seat must have one before it can join.
+	if err := seed.SetBondDeposit("aa11bb22:0"); err != nil {
+		t.Fatalf("bond deposit: %v", err)
+	}
+	rt, err := New(Config{
+		Rules: g, Bridge: conn, Book: book,
+		Identity: seed, SeatTags: testTags,
+	})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
@@ -54,19 +65,48 @@ func stand(t *testing.T, g Rules) (*bridgetest.Bridge, *Runtime, context.CancelF
 	return fake, rt, cancel
 }
 
+// testTags stand in for a game's own frozen seat-key tags.
+var testTags = identity.SeatTags{
+	Session: "testgame/table-session/v1",
+	Log:     "testgame/table-log/v1",
+	Bond:    "testgame/bond/v1",
+}
+
 func TestARuntimeNeedsAGameABridgeAndSomewhereToWriteMoneyDown(t *testing.T) {
 	book, err := spend.OpenBook(spend.MemStore())
 	if err != nil {
 		t.Fatalf("book: %v", err)
 	}
+	seed, err := identity.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	full := func(mut func(*Config)) Config {
+		c := Config{Rules: &trivialGame{}, Bridge: &transport.Bridge{}, Book: book,
+			Identity: seed, SeatTags: testTags}
+		mut(&c)
+		return c
+	}
 	for _, tc := range []struct {
 		name string
 		cfg  Config
 	}{
-		{"no game", Config{Book: book}},
-		{"no bridge", Config{Rules: &trivialGame{}, Book: book}},
-		{"no spend book", Config{Rules: &trivialGame{}, Bridge: &transport.Bridge{}}},
-		{"a game that introduces nothing", Config{Rules: &namelessGame{}, Bridge: &transport.Bridge{}, Book: book}},
+		{"no identity", full(func(c *Config) { c.Identity = nil })},
+		{"no seat tags", full(func(c *Config) { c.SeatTags = identity.SeatTags{} })},
+		{"half the seat tags", full(func(c *Config) { c.SeatTags.Bond = "" })},
+	} {
+		if _, err := New(tc.cfg); err == nil {
+			t.Errorf("%s: built a runtime that could not derive a seat key", tc.name)
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+	}{
+		{"no game", full(func(c *Config) { c.Rules = nil })},
+		{"no bridge", full(func(c *Config) { c.Bridge = nil })},
+		{"no spend book", full(func(c *Config) { c.Book = nil })},
+		{"a game that introduces nothing", full(func(c *Config) { c.Rules = &namelessGame{} })},
 	} {
 		if _, err := New(tc.cfg); err == nil {
 			t.Errorf("%s: built a runtime that could not work", tc.name)
@@ -106,8 +146,8 @@ func TestAFourMethodGameAnswersAllFiveControlRequests(t *testing.T) {
 		{"accept an invite", &gamingpb.BridgeRequest{
 			RequestId: "r4",
 			Req: &gamingpb.BridgeRequest_AcceptInvite{
-				AcceptInvite: &gamingpb.AcceptInvite{Invite: "inv", Gcid: strings.Repeat("a", 64)},
-			}}, false},
+				AcceptInvite: &gamingpb.AcceptInvite{Invite: invite(t, nil), Gcid: testGCID},
+			}}, true},
 		{"reclaim", &gamingpb.BridgeRequest{
 			RequestId: "r5",
 			Req: &gamingpb.BridgeRequest_Reclaim{
@@ -176,21 +216,22 @@ func TestAGameCanReadTheChainTip(t *testing.T) {
 	}
 }
 
-// A stranger cannot talk to a table they are not seated at, checked before any
-// state is allocated for them.
-func TestAStrangerIsNotAuthorisedAtATableTheyAreNotAt(t *testing.T) {
+// Authorization bounds memory rather than checking identity: a sender may
+// allocate reassembly state for a table this game is at, and no other. The
+// sender is not checked at all, deliberately - see Runtime.authorized.
+func TestOnlyATableThisGameIsAtMayAllocateState(t *testing.T) {
 	_, rt, _ := stand(t, &trivialGame{})
-	if rt.authorized("no-such-table", "stranger") {
-		t.Fatal("a stranger was authorised at a table that does not exist")
+	if rt.authorized("no-such-table", "anyone") {
+		t.Fatal("a stranger allocated state for a table this game is not at")
 	}
 	rt.mu.Lock()
-	rt.tables["m1"] = &table{match: "m1", senders: []string{"friend"}}
+	rt.tables["m1"] = &table{match: "m1"}
 	rt.mu.Unlock()
-	if rt.authorized("m1", "stranger") {
-		t.Fatal("a stranger was authorised at a table they are not seated at")
+	if !rt.authorized("m1", "anyone") {
+		t.Fatal("a message for a table this game is at was refused")
 	}
-	if !rt.authorized("m1", "friend") {
-		t.Fatal("a seated player was refused")
+	if !rt.authorized("m1", "") {
+		t.Fatal("the sender is meant to be ignored, and was not")
 	}
 }
 
