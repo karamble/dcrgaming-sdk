@@ -269,8 +269,10 @@ func (r *Runtime) settleDraft(match string, out Outcome) (escrow.SettleDraft, er
 		}
 		staked, ok := t.funded[seat]
 		if !ok || staked.outpoint == "" {
-			return escrow.SettleDraft{}, fmt.Errorf("seat %d's stake is not on the chain yet: %w",
-				seat, ErrNotYet)
+			// A state, not a missing stage: funding exists, this seat has
+			// simply not done it. Wrapping ErrNotYet here would tell a
+			// caller the runtime cannot settle at all.
+			return escrow.SettleDraft{}, fmt.Errorf("seat %d's stake is not on the chain yet", seat)
 		}
 		prevout, err := outpointOf(staked.outpoint)
 		if err != nil {

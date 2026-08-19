@@ -116,7 +116,11 @@ func TestASeatWithNoStakeOnChainCannotBeSettled(t *testing.T) {
 	if err == nil {
 		t.Fatal("settled a table nobody had funded")
 	}
-	if !errors.Is(err, ErrNotYet) && !strings.Contains(err.Error(), "seating") {
+	// Not ErrNotYet: settlement is built, this table is simply not ready.
+	if errors.Is(err, ErrNotYet) {
+		t.Fatalf("an unfunded table reported settlement as unbuilt: %v", err)
+	}
+	if !strings.Contains(err.Error(), "seating") && !strings.Contains(err.Error(), "not on the chain") {
 		t.Fatalf("refused for the wrong reason: %v", err)
 	}
 }

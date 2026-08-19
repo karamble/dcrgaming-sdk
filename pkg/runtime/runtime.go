@@ -20,11 +20,15 @@ import (
 	"github.com/karamble/dcrgaming-sdk/pkg/spend"
 )
 
-// ErrNotYet is returned by a stage the runtime does not carry out yet.
+// ErrNotYet marked a stage the runtime did not carry out yet.
 //
-// The lifecycle is built as one slim end-to-end path first and filled in stage
-// by stage, so a game can plug in and be told plainly which stage is still
-// missing rather than discovering it as a nil dereference.
+// Nothing returns it: every stage of the lifecycle is built. It is kept only so
+// the two tests that assert *nothing* reports a stage as missing have something
+// to assert against, and so a stage added later has an obvious sentinel to
+// reach for.
+//
+// Do not branch on it in a game. A branch on this never fires, which is worse
+// than not having written it.
 var ErrNotYet = errors.New("this stage of the lifecycle is not built yet")
 
 // Config is everything the runtime needs to run a game.
