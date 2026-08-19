@@ -465,6 +465,24 @@ func (r *Runtime) Seats(match string) (map[uint32][]byte, bool) {
 }
 
 // Payout is the address the operator set for winnings, if they have set one.
+// Terms are one table's money terms, as agreed. Empty for a table this game is
+// not at.
+//
+// A read surface: what a table costs, how long its money is locked, what a rung
+// of its accusation chain pays. A game shows these to a person before they
+// commit, and cannot be expected to have kept its own copy of what the runtime
+// agreed on its behalf.
+func (r *Runtime) Terms(match string) membership.Terms {
+	t, err := r.rawTable(match)
+	if err != nil {
+		return membership.Terms{}
+	}
+	if t.form != nil {
+		return t.form.Terms()
+	}
+	return t.terms
+}
+
 func (r *Runtime) Payout() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
