@@ -113,6 +113,16 @@ func (r *Runtime) PresignLadder(ctx context.Context, match string) error {
 
 // accuseDraft is the chain's first rung against a seat's table bond.
 func (r *Runtime) accuseDraft(t *table, against uint32) (escrow.AccuseDraft, error) {
+	// Checked before anything is looked up: the fee comes from the terms and
+	// the game, not from the chain, so a table that has neither is malformed
+	// rather than merely unfunded.
+	fee := feeFor(t.form.Terms().AccuseFeeAtoms, r.accuseFee)
+	if fee <= 0 {
+		return escrow.AccuseDraft{}, fmt.Errorf(
+			"neither this table's terms nor this game states what one rung of an " +
+				"accusation costs, and a chain built at a fee nobody chose has an " +
+				"attrition bound nobody can rely on")
+	}
 	bond, err := r.tableBondOf(t, against)
 	if err != nil {
 		return escrow.AccuseDraft{}, err
@@ -131,14 +141,23 @@ func (r *Runtime) accuseDraft(t *table, against uint32) (escrow.AccuseDraft, err
 	if err != nil {
 		return escrow.AccuseDraft{}, err
 	}
-	fee := int64(t.form.Terms().AccuseFeeAtoms)
-	if fee <= 0 {
-		return escrow.AccuseDraft{}, fmt.Errorf("this table states no accusation fee")
-	}
 	return escrow.AccuseDraft{
 		Bond: script, Prevout: prevout, ValueAtoms: funded.atoms,
 		FeeAtoms: fee, Params: r.params,
 	}, nil
+}
+
+// feeFor is the accusation fee's precedence: the table's terms where they state
+// one, the game's own otherwise, and nothing when neither does.
+//
+// Terms win because a fee both seats agreed is stronger than one they each read
+// from their own build. The fallback exists for tables formed before the term
+// did, whose digest cannot move to add it.
+func feeFor(stated, game uint64) int64 {
+	if stated > 0 {
+		return int64(stated)
+	}
+	return int64(game)
 }
 
 // adoptAccusation takes the other seat's signature on one rung.

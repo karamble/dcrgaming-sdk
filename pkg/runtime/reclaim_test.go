@@ -297,3 +297,45 @@ func mustTerms(t *testing.T, rt *Runtime, sid string) membership.Terms {
 	got.SID = sid
 	return got
 }
+
+// A game's own reclaim fee is used, not the runtime's default. dcrpoker has
+// always paid 20,000 and adopting somebody else's number would silently change
+// bytes that move its money.
+func TestAGamesOwnReclaimFeeIsUsed(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  int64
+		want int64
+	}{
+		{"unset falls back to the default", 0, DefaultReclaimFee},
+		{"negative falls back too", -1, DefaultReclaimFee},
+		{"poker's own", 20_000, 20_000},
+	} {
+		rt := standWithReclaimFee(t, tc.cfg)
+		if rt.reclaimFee != tc.want {
+			t.Errorf("%s: fee is %d, want %d", tc.name, rt.reclaimFee, tc.want)
+		}
+	}
+}
+
+// And it reaches the transaction: a bond reclaimed at a bigger fee pays out
+// less.
+func TestTheReclaimFeeReachesTheTransaction(t *testing.T) {
+	fake, rt, _ := stand(t, &trivialGame{})
+	fundBond(t, fake, rt, int64(escrow.MinBondBlocks))
+	if rt.reclaimFee != DefaultReclaimFee {
+		t.Fatalf("the fixture's fee is %d", rt.reclaimFee)
+	}
+	txid, err := reclaimBond(rt, payTo(t))
+	if err != nil {
+		t.Fatalf("reclaim: %v", err)
+	}
+	out, ok := fake.Output(txid, 0)
+	if !ok {
+		t.Fatal("the reclaim made no output")
+	}
+	if want := int64(escrow.MinBondAtoms) - DefaultReclaimFee; out.Value != want {
+		t.Fatalf("the reclaim paid %d, want %d at a fee of %d",
+			out.Value, want, DefaultReclaimFee)
+	}
+}
