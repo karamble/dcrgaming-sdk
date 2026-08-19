@@ -192,11 +192,19 @@ Honest state of the runtime, so you know what you would hit:
 | connect, identify, dial | done |
 | invite, terms, seating | done |
 | spend book and its state machine | done |
-| reclaiming your own bond | done |
+| funding a stake | done |
+| settlement: build, co-sign, broadcast | done |
+| reclaiming a bond, a stake or a table bond | done |
 | forfeiture mechanism | done (`pkg/punish`, `pkg/evidence`) |
-| funding a stake or a table bond | **not built** |
-| settlement co-signing and broadcast | **not built** |
-| reclaiming a stake or table bond | **not built** |
+| forfeiture *execution* through the runtime | **not built** |
+
+The last row is the one gap, and it is a real one. Carrying out a forfeiture
+needs the punishment-key exchange first - every seat announcing, with a proof of
+possession, the key its opponent's forfeitable bond will name - and then those
+bonds funded. The mechanism that spends them is here and tested; what is missing
+is the exchange that sets them up. Until then `Forfeit` validates your ruling,
+verifies an equivocation cryptographically, and then tells you the stage is not
+built rather than guessing.
 
 Anything unbuilt returns an error wrapping `runtime.ErrNotYet`, naming the stage.
 Nothing guesses.
