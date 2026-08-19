@@ -167,6 +167,14 @@ func (r *Runtime) landDeposit(ctx context.Context, t *table, seat uint32, rec sp
 	// Where a stake landed is the one fact a restart cannot rediscover:
 	// nothing on the chain says which outpoint was this table's.
 	r.keep(t)
+
+	// And the one fact no other seat can discover either. Said as soon as
+	// it is known and repeated every block until the table is funded: the
+	// first attempt goes out seconds after the broadcast, when every peer
+	// still refuses it for want of a confirmation.
+	if err := r.announceFunded(ctx, t.match); err != nil {
+		r.log.Warnf("table %s: saying where the stake is: %v", t.match, err)
+	}
 	return nil
 }
 

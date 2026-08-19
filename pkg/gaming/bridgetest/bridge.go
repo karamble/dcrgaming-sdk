@@ -107,6 +107,8 @@ type Bridge struct {
 	refusal string
 	states  []*gamingpb.GameState
 	replies []*gamingpb.RespondRequest
+	// frames is every frame a game has put on this bridge, in order.
+	frames []*gamingpb.Frame
 
 	unreachable atomic.Bool
 	pushed      atomic.Int64
@@ -248,6 +250,16 @@ func (b *Bridge) Subscribers() int {
 	return len(b.subs)
 }
 
+// Sent is every frame a game has put on the bridge, in order.
+//
+// Counted rather than decoded: a frame is chunked and encoded on the way out,
+// and what a test of repetition needs is how many went, not what was in them.
+func (b *Bridge) Sent() []*gamingpb.Frame {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]*gamingpb.Frame(nil), b.frames...)
+}
+
 // Relayed is how many frames have been pushed to a subscriber, which a test
 // waits on rather than sleeping.
 func (b *Bridge) Relayed() int64 { return b.pushed.Load() }
@@ -325,6 +337,7 @@ func (b *Bridge) SendFrame(ctx context.Context, req *gamingpb.SendFrameRequest) 
 	from := callerCN(ctx)
 	frame := &gamingpb.Frame{Gcid: req.GetGcid(), From: from, Frame: req.GetFrame()}
 	b.mu.Lock()
+	b.frames = append(b.frames, frame)
 	for cn, ch := range b.subs {
 		if cn == from {
 			continue

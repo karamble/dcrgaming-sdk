@@ -148,6 +148,10 @@ type table struct {
 	tableBondFunded map[uint32]staked
 	release         *release
 	ladder          *ladder
+
+	// saidAt is the height this table last repeated its announcements at,
+	// so they go out once a block rather than once a poll.
+	saidAt int64
 }
 
 // settlement is one table's payout, part-signed.
@@ -256,7 +260,8 @@ func (r *Runtime) deliver(d transport.Delivery) {
 // which is why the set is small, fixed, and documented.
 func (r *Runtime) ours(k schema.Kind) bool {
 	switch k {
-	case schema.KindJoin, schema.KindCommit, schema.KindSettle, KindPunishKey, KindRelease, KindAccusation:
+	case schema.KindJoin, schema.KindCommit, schema.KindSettle, KindPunishKey, KindRelease, KindAccusation,
+		KindFunded, KindBonded, KindPayout:
 		return true
 	}
 	return false
@@ -291,6 +296,27 @@ func (r *Runtime) handleOurs(ctx context.Context, msg Message) error {
 			return fmt.Errorf("read a payout: %w", err)
 		}
 		return r.adoptSettlement(ctx, msg.Match, st)
+
+	case KindFunded:
+		var f schema.Funded
+		if err := json.Unmarshal(msg.Body, &f); err != nil {
+			return fmt.Errorf("read where a stake is: %w", err)
+		}
+		return r.adoptFunded(ctx, msg.Match, f)
+
+	case KindBonded:
+		var b schema.Bonded
+		if err := json.Unmarshal(msg.Body, &b); err != nil {
+			return fmt.Errorf("read where a bond is: %w", err)
+		}
+		return r.adoptBonded(ctx, msg.Match, b)
+
+	case KindPayout:
+		var pay schema.Payout
+		if err := json.Unmarshal(msg.Body, &pay); err != nil {
+			return fmt.Errorf("read a payout: %w", err)
+		}
+		return r.adoptPayout(ctx, msg.Match, pay)
 
 	case KindPunishKey:
 		var n membership.PunishNote
