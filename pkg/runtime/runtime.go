@@ -9,6 +9,8 @@ import (
 	"github.com/decred/slog"
 
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/transport"
+	"github.com/karamble/dcrgaming-sdk/pkg/identity"
+	"github.com/karamble/dcrgaming-sdk/pkg/membership"
 	"github.com/karamble/dcrgaming-sdk/pkg/spend"
 )
 
@@ -29,6 +31,13 @@ type Config struct {
 	// Book is where money in flight is recorded. Required - a runtime with
 	// nowhere to write a request down is a runtime that can lose a payment.
 	Book *spend.Book
+	// Identity is the game's seed, from which every seat key is derived.
+	// Required.
+	Identity *identity.Identity
+	// SeatTags are the game's own domain-separation tags for those keys.
+	// Required, and the game's to state: they are frozen hash inputs that
+	// decide which keys a seat has, so the SDK must not invent them.
+	SeatTags identity.SeatTags
 	// Log is optional.
 	Log slog.Logger
 }
@@ -38,10 +47,12 @@ type Config struct {
 //
 // A game hands it [Rules] and calls [Game] methods; it never drives.
 type Runtime struct {
-	rules  Rules
-	bridge *transport.Bridge
-	book   *spend.Book
-	log    slog.Logger
+	rules    Rules
+	bridge   *transport.Bridge
+	book     *spend.Book
+	identity *identity.Identity
+	seatTags identity.SeatTags
+	log      slog.Logger
 
 	mu     sync.Mutex
 	router *transport.Router
@@ -54,10 +65,9 @@ type Runtime struct {
 type table struct {
 	match string
 	gcID  string
+	form  *membership.Formation
 	seats map[uint32][]byte
-	// senders are the identities allowed to talk to this table.
-	senders []string
-	log     []Entry
+	log   []Entry
 }
 
 // New builds a runtime. It does not start anything; call [Runtime.Run].
@@ -71,6 +81,12 @@ func New(cfg Config) (*Runtime, error) {
 	if cfg.Book == nil {
 		return nil, fmt.Errorf("a runtime needs a spend book; money in flight has to be written down")
 	}
+	if cfg.Identity == nil {
+		return nil, fmt.Errorf("a runtime needs the game's identity to derive seat keys from")
+	}
+	if cfg.SeatTags.Session == "" || cfg.SeatTags.Log == "" || cfg.SeatTags.Bond == "" {
+		return nil, fmt.Errorf("a runtime needs the game's three seat-key tags; they are frozen inputs and the SDK must not invent them")
+	}
 	if err := cfg.Rules.Identity().Validate(); err != nil {
 		return nil, fmt.Errorf("the game does not introduce itself: %w", err)
 	}
@@ -80,6 +96,7 @@ func New(cfg Config) (*Runtime, error) {
 	}
 	return &Runtime{
 		rules: cfg.Rules, bridge: cfg.Bridge, book: cfg.Book, log: log,
+		identity: cfg.Identity, seatTags: cfg.SeatTags,
 		tables: map[string]*table{},
 		names:  map[string]string{},
 	}, nil
@@ -143,22 +160,6 @@ func (r *Runtime) route(ctx context.Context, frames <-chan transport.InboundFram
 
 	transport.Receive(ctx, frames, router)
 	return ctx.Err()
-}
-
-// authorized reports whether a sender may talk to a table.
-func (r *Runtime) authorized(sid, sender string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	t, ok := r.tables[sid]
-	if !ok {
-		return false
-	}
-	for _, s := range t.senders {
-		if s == sender {
-			return true
-		}
-	}
-	return false
 }
 
 // Chain is the tip, for a game running its own duty clocks.

@@ -128,14 +128,23 @@ func (r *Runtime) setPayout(_ context.Context, addr string) error {
 }
 
 // setNames records the operator's names for the identities at the table. They
-// are decoration: nothing routes or pays by them.
+// are decoration: nothing that moves money reads a name.
+//
+// Merged rather than replaced, and an empty name removes one, so a console can
+// correct a single entry without restating the rest.
 func (r *Runtime) setNames(names map[string]string) {
 	r.mu.Lock()
-	r.names = make(map[string]string, len(names))
+	defer r.mu.Unlock()
+	if r.names == nil {
+		r.names = map[string]string{}
+	}
 	for k, v := range names {
+		if strings.TrimSpace(v) == "" {
+			delete(r.names, k)
+			continue
+		}
 		r.names[k] = v
 	}
-	r.mu.Unlock()
 }
 
 // gameState asks the game what to show, and adds what the runtime knows.
@@ -159,17 +168,6 @@ func (r *Runtime) gameState(ctx context.Context) (st *gamingpb.GameState) {
 		})
 	}
 	return st
-}
-
-// acceptInvite joins the table an invite names. Seating is T-09.
-func (r *Runtime) acceptInvite(_ context.Context, req *gamingpb.AcceptInvite) (string, error) {
-	if strings.TrimSpace(req.GetInvite()) == "" {
-		return "", fmt.Errorf("an invite is required")
-	}
-	if !gcID.MatchString(req.GetGcid()) {
-		return "", fmt.Errorf("that is not a group chat id")
-	}
-	return "", fmt.Errorf("accepting an invite: %w", ErrNotYet)
 }
 
 // doReclaim pulls locked money home. Reclaim is T-10.
