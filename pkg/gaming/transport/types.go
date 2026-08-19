@@ -92,5 +92,6 @@ type Spend struct {
 func (s Spend) Settled() bool { return s.State != SpendPending }
 
 // spendPoll is how often the bridge is asked whether somebody has answered. A
-// person is being waited on, so this is patient by design.
-const spendPoll = 3 * time.Second
+// person is being waited on, so this is patient by design. A variable only so a
+// test need not wait three seconds per poll.
+var spendPoll = 3 * time.Second
