@@ -170,17 +170,6 @@ func (r *Runtime) gameState(ctx context.Context) (st *gamingpb.GameState) {
 	return st
 }
 
-// Settle declares who won. Settlement is T-11.
-func (r *Runtime) Settle(_ context.Context, match string, out Outcome) error {
-	if match == "" {
-		return fmt.Errorf("settling needs a table")
-	}
-	if !out.Void && len(out.Shares) == 0 {
-		return fmt.Errorf("an outcome that is neither void nor a share of anything settles nothing")
-	}
-	return fmt.Errorf("settling: %w", ErrNotYet)
-}
-
 // Forfeit carries out a ruling. Forfeiture is T-12.
 //
 // The ruling is checked here even though the stage is not built: a game
