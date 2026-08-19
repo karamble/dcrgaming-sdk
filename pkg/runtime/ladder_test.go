@@ -423,3 +423,53 @@ func TestAGamesOwnFeeIsEnoughWhenTermsStateNone(t *testing.T) {
 		t.Fatalf("the game's fee was not used: %d", d.FeeAtoms)
 	}
 }
+
+// A chain is not opened before the duty it names has lapsed.
+//
+// The game decides what was owed and when it was due; the chain decides
+// whether that moment has passed, and the runtime asks it rather than taking
+// the game's word. An accusation spends the accused's bond into a claim they
+// have a window to answer, so one opened early is a window that closes before
+// they could have known they owed anything - and the accuser keeps the bond.
+func TestAChainIsNotOpenedBeforeTheDutyHasLapsed(t *testing.T) {
+	fake, rt, _ := stand(t, &trivialGame{})
+	sid, _ := bondedTwo(t, rt, fake)
+	if err := rt.PresignLadder(context.Background(), sid); err != nil {
+		t.Fatalf("presign: %v", err)
+	}
+	mine := ourSeatOf(t, rt, sid)
+	ahead := uint32(fake.Height() + 10)
+
+	err := rt.Forfeit(context.Background(), ruling.Ruling{
+		Match: sid, Against: 1 - mine, Kind: ruling.Silence,
+		Silent: &ruling.Silent{Duty: "answer", Seq: 1, By: ahead},
+	})
+	if err == nil {
+		t.Fatal("opened a chain against a duty that has not lapsed yet")
+	}
+	if !strings.Contains(err.Error(), "not yet had a chance to defend") {
+		t.Fatalf("refused for the wrong reason: %v", err)
+	}
+	if _, run, _ := rt.Ladder(sid); run != 0 {
+		t.Fatalf("%d rungs were run anyway", run)
+	}
+
+	// Once the chain has passed it, the same ruling gets past this gate. It
+	// stops at the next one - a single peer's chain has only its own
+	// signature - and that is the point: the refusal has changed, so the
+	// height is no longer what is standing in the way.
+	fake.SetHeight(int64(ahead))
+	err = rt.Forfeit(context.Background(), ruling.Ruling{
+		Match: sid, Against: 1 - mine, Kind: ruling.Silence,
+		Silent: &ruling.Silent{Duty: "answer", Seq: 1, By: ahead},
+	})
+	if err == nil {
+		t.Fatal("a chain with one signature was run")
+	}
+	if strings.Contains(err.Error(), "chance to defend") {
+		t.Fatalf("the duty has lapsed and the height is still refusing it: %v", err)
+	}
+	if !strings.Contains(err.Error(), "not co-signed") {
+		t.Fatalf("stopped for an unexpected reason: %v", err)
+	}
+}

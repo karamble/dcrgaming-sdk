@@ -224,6 +224,22 @@ func (r *Runtime) Forfeit(ctx context.Context, rl ruling.Ruling) error {
 		}
 		return r.sweepForfeited(ctx, rl, recovered)
 	case ruling.Silence:
+		// The height the game says the duty lapsed at has to have
+		// passed. Not politeness: an accusation spends the accused's
+		// bond into a claim they have a window to answer, so one opened
+		// early is a window that closes before they could have known
+		// they owed anything. The game decides what was owed; the chain
+		// decides whether it is late.
+		tip, err := r.bridge.ChainTip(ctx)
+		if err != nil {
+			return fmt.Errorf("read the tip before accusing: %w", err)
+		}
+		if by := int64(rl.Silent.By); tip.Height < by {
+			return fmt.Errorf(
+				"this ruling says the duty lapsed at height %d and the chain is at %d; "+
+					"accusing now would spend a bond the accused has not yet had a chance to defend",
+				by, tip.Height)
+		}
 		return r.runLadder(ctx, rl.Match, rl.Against)
 	case ruling.Clean:
 		return r.releaseTableBond(ctx, rl.Match)
