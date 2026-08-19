@@ -230,7 +230,7 @@ The runtime owns all six stages. A game supplies its rules and nothing else.
 commitment, match rules, turn engine, UI, all finished. Rebuild its daemon on the runtime
 and whatever a developer still has to hand-write is the SDK's remaining gap. The target
 is that they write their rules, name their game, declare their stake and bond terms, and
-hand the runtime a typed ruling when their own rules decide a seat has forfeited. They
+call the runtime's forfeiture verbs when their own rules decide a seat has forfeited. They
 write no bridge dispatcher, no spend book, no bond ladder, no sweeper and no seating state
 machine — and they never see an HMAC tag, an escrow script or a gRPC call. Measured
 against today's daemon, the residual should be `board`, `turns`, `phases` and `commitment`

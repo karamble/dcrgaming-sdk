@@ -434,9 +434,12 @@ func mustSeats(t *testing.T, rt *Runtime, sid string) map[uint32][]byte {
 // A payout spends every seat's stake, so a game withholding any one seat holds
 // the whole thing - and the stakes go home through their own refunds instead.
 func TestAWithheldSeatHoldsTheWholePayout(t *testing.T) {
-	fake, rt, _ := stand(t, &withholding{against: 1})
+	game := &withholding{}
+	fake, rt, _ := stand(t, game)
 	sid, them := seatTwo(t, fake, rt)
 	fundBoth(t, fake, rt, sid, them)
+	theirSeat, _ := them.form.OurSeat()
+	game.hold(theirSeat)
 
 	pot := int64(stakeAtoms * 2)
 	winner := ourSeatOf(t, rt, sid)

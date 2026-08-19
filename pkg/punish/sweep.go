@@ -57,6 +57,14 @@ type Sweep struct {
 // divergent pair of attestations - into the finished punishment-branch spend,
 // verified by the real script engine on the way out.
 //
+// Nothing here takes the caller's word that the key belongs to the seat being
+// punished, and nothing needs to. The key is aggregated with the punisher half
+// and looked for among the bond's branches: a key that is not the accused's
+// yields a point that is in none of them, and escrow.ForfeitIndex refuses it
+// before a transaction is built. That refusal, and the script engine behind
+// it, are the whole authorisation - so it holds only while the bond handed in
+// was derived from the roster rather than believed off the wire.
+//
 // The single output is the pinned payout and nothing else can be expressed:
 // the draft has no destination field, BuildForfeit cannot add a second output,
 // and CheckPinned holds the finished bytes to the script the caller supplied.

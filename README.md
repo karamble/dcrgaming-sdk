@@ -29,7 +29,7 @@ do not, and the one failure mode that costs money.
   a seating machine.
 - `pkg/spend` - the record of money in flight, and the state machine that keeps
   "could not ask" apart from "the answer was no".
-- `pkg/ruling` - how a game hands the runtime a forfeiture it can check.
+- `pkg/evidence` - both halves of an equivocation, retained, and the key they give up.
 - `pkg/punish` and `pkg/evidence` - carrying a forfeiture out: the bond ladder,
   the sweep, the release and the equivocation store.
 - `pkg/gaming/connect` - a game's connection to a bridge, headless.
@@ -74,7 +74,7 @@ The warts below are deliberate; every one is load-bearing under live coin.
   and schema configuration instead.
 - `schema.Duty` and `schema.DutyKind` are poker's vocabulary too - cardkey,
   shuffle, share, action, checkpoint, reveal, indexed by hand - and so is half
-  of `forfeit.Domain`. Another game names its duties itself; `ruling.Silent`
+  of `forfeit.Domain`. Another game names its duties itself; `runtime.Lapsed`
   carries an opaque label for exactly this reason.
 - `identity.Credentials` derives all three seat keys per session id, but
   `identity.BondDeposit` is one outpoint per identity. Pair them and the bond

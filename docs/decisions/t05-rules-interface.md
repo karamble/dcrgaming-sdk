@@ -34,7 +34,7 @@ should be shown. Nothing that the runtime can work out for itself is in here.
 
 Two things flow the other way, as methods on the runtime rather than on `Rules`,
 because they happen when the game's rules say so and not when the runtime asks:
-**an outcome** (the runtime does not know who won) and **a ruling** (the runtime
+**an outcome** (the runtime does not know who won) and **forfeiture** (the runtime
 does not know who cheated).
 
 ## How it was checked

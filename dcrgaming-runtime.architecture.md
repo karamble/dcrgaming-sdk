@@ -150,7 +150,7 @@ What the chosen approach needs that does not exist anywhere yet:
 
 - **The `Rules` interface.** Neither game has anything resembling it; both are written as
   drivers, not as implementations. This is the central new artifact.
-- **A typed forfeiture ruling** and its evidence envelope.
+- **A forfeiture vocabulary** the SDK can act on without knowing the game.
 - **A unified spend record and its state machine**, replacing two incompatible types.
 - **Bond terms in the shared vocabulary** — `membership.Terms` has none.
 - **A supported bridge test double.** Both games built their own; a third-party developer
@@ -162,7 +162,9 @@ What the chosen approach needs that does not exist anywhere yet:
 
 Three one-way calls to de-risk before committing.
 
-**1. The forfeiture handover.**
+**1. The forfeiture handover.** *(Ran; PROCEED, then reversed on the rule's own
+second arm — see [t15](docs/decisions/t15-money-shaped-verbs.md). The ruling type
+is gone and the SDK's forfeiture vocabulary now names money rather than games.)*
 - *Question*: what exactly is a ruling, such that the SDK can execute it without knowing
   the game's rules?
 - *Spike*: define the ruling and evidence types, then check they express battleships'

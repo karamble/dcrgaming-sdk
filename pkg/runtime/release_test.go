@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/decred/dcrd/chaincfg/v3"
@@ -273,25 +274,38 @@ func placeTableBond(t *testing.T, rt *Runtime, sid string, seat uint32) {
 	rt.mu.Unlock()
 }
 
-// withholding is a game that refuses to co-sign for one named seat.
+// withholding is a game that refuses to co-sign for one named seat. The seat is
+// set after seating, because which seat the other peer gets is drawn from a
+// block hash and is not known when the game is built.
 type withholding struct {
 	battleshipsRules
+	mu      sync.Mutex
 	against uint32
+	named   bool
 }
 
-func (w *withholding) WillCoSign(_ string, seat uint32) bool { return seat != w.against }
+func (w *withholding) hold(seat uint32) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.against, w.named = seat, true
+}
+
+func (w *withholding) WillCoSign(_ string, seat uint32) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return !w.named || seat != w.against
+}
 
 // A game can punish by refusing to sign, which is the only punishment some
 // rulings have. The other seat's release is not co-signed and nothing is built.
 func TestAGameCanWithholdASeatsRelease(t *testing.T) {
-	fake, rt, _ := stand(t, &withholding{against: 1})
+	game := &withholding{}
+	fake, rt, _ := stand(t, game)
 	sid, them := readyToRelease(t, rt, fake)
 
 	// Their bond, their release, and this peer is asked to co-sign it.
 	theirSeat, _ := them.form.OurSeat()
-	if theirSeat != 1 {
-		t.Fatalf("this test names seat 1 and the other seat is %d", theirSeat)
-	}
+	game.hold(theirSeat)
 	placeTableBond(t, rt, sid, theirSeat)
 	draft, err := rt.releaseDraft(rt.tables[sid], theirSeat)
 	if err != nil {
@@ -336,9 +350,12 @@ func TestAGameCanWithholdASeatsRelease(t *testing.T) {
 // The same peer signs for a seat the game has not named, so withholding is a
 // refusal about one seat and not a table that has stopped working.
 func TestWithholdingOneSeatDoesNotStopTheOthers(t *testing.T) {
-	fake, rt, _ := stand(t, &withholding{against: 9})
+	game := &withholding{}
+	fake, rt, _ := stand(t, game)
 	sid, them := readyToRelease(t, rt, fake)
 
+	// A seat that is not at this table, so nothing here is withheld.
+	game.hold(9)
 	theirSeat, _ := them.form.OurSeat()
 	placeTableBond(t, rt, sid, theirSeat)
 	draft, err := rt.releaseDraft(rt.tables[sid], theirSeat)

@@ -31,6 +31,12 @@ test environment, no testnet stage · the SDK never rules on forfeiture.
 ### T-01 — Spike: the forfeiture handover contract
 **One-way door. Gates T-05 and T-13.**
 
+> **Delivered, then reopened.** `pkg/ruling` shipped and was deleted again on
+> 2026-08-20: the decision rule's second arm was never tested and it failed.
+> `Runtime.Seize`, `Accuse` and `Release` replace it. See
+> [t15-money-shaped-verbs](../decisions/t15-money-shaped-verbs.md). The scope
+> below is left as written.
+
 - **Scope**: define the ruling and evidence types the game hands the SDK. Prove they
   express battleships' three fates (sweep on equivocation, take on silence, attrition on
   an answered-out ladder) *and* poker's take/release, using both games' existing call sites

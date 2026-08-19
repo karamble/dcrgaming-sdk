@@ -1,3 +1,16 @@
+> **Superseded on 2026-08-20 by [t15-money-shaped-verbs](t15-money-shaped-verbs.md).**
+> `pkg/ruling` is gone; `Runtime.Seize`, `Accuse` and `Release` replace
+> `Forfeit`. Kept because most of the reasoning below survives and because the
+> decision rule it applied is the same rule that later overturned it.
+>
+> **Finding 3's first bullet is false and was false when written.**
+> `forfeit.Recover` verifies neither signature, so the equivocation proof was
+> never evidence and "a game cannot cause a sweep by lying" did not follow from
+> it. It happens to be true anyway, for a different reason: a sweep needs the
+> accused's log key, and the escrow refuses any key that opens no branch. See
+> t15. Everything else here, including the correction recorded at the bottom,
+> still holds.
+
 # T-01 — The forfeiture handover: decision
 
 **Spike outcome: PROCEED.** One ruling type covers both games with no
@@ -59,7 +72,8 @@ money.
 **3. The two kinds are safe for different reasons, and this is the load-bearing
 part of the design.**
 
-- **Equivocation is verified, cryptographically, in the SDK.** Two signatures
+- ~~**Equivocation is verified, cryptographically, in the SDK.**~~ *False; see
+  the header.* Two signatures
   sharing a nonce expose the signer's key; `forfeit.Recover` either produces it
   or reports that no key is exposed. The game's assertion is *not* what moves the
   bond — the recovered key is. A game cannot cause a sweep by lying.

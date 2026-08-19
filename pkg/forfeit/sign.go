@@ -356,9 +356,18 @@ func scalarOf(b []byte) (*secp256k1.ModNScalar, error) {
 // anyone holding both halves of an equivocation proof can run it, and what
 // comes out is the key that made both signatures.
 //
-// It is checked against the public key before being returned, so a caller
-// cannot be handed a plausible-looking scalar derived from two signatures that
-// merely happened to collide.
+// The result is checked against the public key before being returned, so a
+// caller cannot be handed a plausible-looking scalar derived from two
+// signatures that merely happened to collide.
+//
+// What this is not: neither signature is verified here, and the challenge does
+// not bind the public key, so the equality above is against whatever key the
+// caller passed in. Anyone already holding a key can therefore produce a pair
+// that satisfies this function without doing any curve arithmetic - pick a
+// nonce and one scalar, solve for the other. So a successful Recover means "the
+// key is out", never "this seat was caught cheating". Nothing downstream should
+// treat it as evidence: what refuses a key that opens no punishment branch is
+// the escrow, not this.
 func Recover(pub *secp256k1.PublicKey, hashA, sigA, hashB, sigB []byte) (*secp256k1.PrivateKey, error) {
 	if pub == nil {
 		return nil, fmt.Errorf("no key to recover")

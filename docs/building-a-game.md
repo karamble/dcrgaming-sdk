@@ -61,7 +61,9 @@ than methods you implement.
 
 ```go
 game.Settle(ctx, match, runtime.Outcome{Shares: map[uint32]int64{0: pot}})
-game.Forfeit(ctx, ruling.Ruling{ /* ... */ })
+game.Seize(ctx, match, seat, exposed)   // a key that seat's own signatures gave up
+game.Accuse(ctx, match, seat, runtime.Lapsed{Duty: "place", Seq: 4, By: height})
+game.Release(ctx, match)                // nothing to punish; the bond goes home
 ```
 
 **An outcome** is shares, not a winner - a draw, a split pot and a three-way are
@@ -71,9 +73,15 @@ shares name real seats and add up to what the table holds, because a settlement
 that does not add up is one the other seats refuse, and then everybody's money
 waits out a refund timelock over an arithmetic mistake.
 
-**A ruling** says a seat has forfeited. Deciding that is your job - what counts
-as cheating at your game is not something an SDK can know. Carrying it out is
-the runtime's. See below.
+**The other three are forfeiture**, and none of them is a word about your game.
+Deciding that a seat cheated is your job - what counts as cheating at your game
+is not something an SDK can know - and it is a decision you never have to
+explain. You say which money to move. See below.
+
+There is a fourth answer, and it is a refusal rather than a call: implement
+`runtime.CoSigning` and the runtime asks before adding your signature to
+anything that pays another seat. Some rulings have no transaction behind them
+at all, and that is how you say so.
 
 ## What you do not write
 
@@ -95,29 +103,43 @@ You should never type an HMAC tag, an escrow script or a gRPC call.
 This is the boundary most worth understanding.
 
 Your game decides **that** a seat forfeited. The SDK decides **how the money
-moves**. There are three kinds because there are three ways a bond leaves an
-escrow:
+moves**, and it is never told which of your rules was broken. There are four
+answers because there are four things that can happen to a bond:
 
-| Kind | What happens | What you supply |
+| Call | What happens | What you supply |
 |---|---|---|
-| `Clean` | the bond is released to its owner | nothing |
-| `Equivocation` | the bond is swept to the seat that was lied to | the two signatures |
-| `Silence` | the claim ladder runs against a seat that stopped answering | the duty and the height it lapsed |
+| `Release` | your own table bond goes home cooperatively | nothing |
+| `Seize` | a branch of a seat's forfeitable bond is spent | the key that seat exposed |
+| `Accuse` | the claim ladder runs against a seat that stopped answering | the duty and the height it lapsed |
+| *withhold* | nothing moves; you stop co-signing | a `CoSigning` implementation |
 
-The two that punish are safe for different reasons, and it is worth knowing
-which is which.
+**`Seize` is literal, and the name matters.** It spends a branch whose secret
+the accused published. It is not a general power to punish: if your game's
+cheating does not *expose a private key*, there is no branch to spend and this
+verb is unavailable to you. A bad zero-knowledge proof, a permutation that does
+not match its commitment - provable, non-repudiable, and unreachable by `Seize`.
+The ladder is your only lever there, and its ceiling is attrition.
 
-**Equivocation is verified.** Two signatures at one position that share a nonce
-expose the signer's key - that is arithmetic, not judgement. Your assertion is
-not what moves the bond; the recovered key is. You cannot cause a sweep by being
-wrong.
+**Nothing about your evidence is checked, and nothing needs to be.** The runtime
+does not ask why the key is out. What refuses a key that is not the accused's is
+the escrow: it opens no branch of the bond the runtime derived from the roster,
+and that is caught offline before a transaction is built. So you cannot cause a
+sweep by being wrong - not because the SDK audits your proof, but because a key
+you do not hold is a key you cannot supply.
 
-**Silence is not verified, and does not need to be.** Whether a duty was owed is
-your logic, and the SDK has no vocabulary for it. What makes it safe is the
-mechanism: the ladder gives the accused an on-chain right of reply. Accuse a
-seat that is in fact alive and it answers, the ladder runs out, and you have
-bought nothing but attrition - bounded, and `punish.AttritionBound(fee)` tells
-you by how much before anyone bonds.
+**`Accuse` is not verified, and does not need to be.** Whether a duty was owed
+is your logic, and the SDK has no vocabulary for it - `Lapsed.Duty` is a string
+it carries into the log and never reads. What makes it safe is the mechanism:
+the ladder gives the accused an on-chain right of reply. Accuse a seat that is
+in fact alive and it answers, the ladder runs out, and you have bought nothing
+but attrition - bounded, and `punish.AttritionBound(fee)` tells you by how much
+before anyone bonds. The one thing the chain insists on is that the height you
+name has actually passed.
+
+**Withholding strands nothing.** Every pot the runtime builds has a branch its
+owner can spend alone once the lock matures, so refusing to co-sign costs the
+other side a wait and gains you nothing. That is what makes it safe to let you
+decide.
 
 **Duty clocks are yours.** The runtime exposes the chain tip and the signed log;
 deciding what a seat owed and by when is game logic and stays with you.
@@ -207,7 +229,7 @@ tests rather than as code that has been proven.
 ## Compatibility
 
 The module is pre-1.0 and the runtime packages are new. Treat `pkg/runtime`,
-`pkg/spend`, `pkg/ruling`, `pkg/gaming/connect` and `pkg/gaming/bridgetest` as
+`pkg/spend`, `pkg/evidence`, `pkg/gaming/connect` and `pkg/gaming/bridgetest` as
 unstable until this section says otherwise.
 
 The older packages - `escrow`, `forfeit`, `membership`, `gamelog`,
