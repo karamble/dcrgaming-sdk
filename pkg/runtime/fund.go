@@ -154,8 +154,23 @@ func (r *Runtime) awaitAnswer(ctx context.Context, id string) (spend.Record, err
 
 // landDeposit finds the output the payment made and records the seat as funded.
 func (r *Runtime) landDeposit(ctx context.Context, t *table, seat uint32, rec spend.Record) error {
+	out, err := r.findOutput(ctx, rec)
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	if t.funded == nil {
+		t.funded = map[uint32]staked{}
+	}
+	t.funded[seat] = out
+	r.mu.Unlock()
+	return nil
+}
+
+// findOutput locates the output a payment made and marks the request located.
+func (r *Runtime) findOutput(ctx context.Context, rec spend.Record) (staked, error) {
 	if rec.TxID == "" {
-		return fmt.Errorf("the %s was approved without a transaction", rec.Purpose)
+		return staked{}, fmt.Errorf("the %s was approved without a transaction", rec.Purpose)
 	}
 	for vout := range uint32(maxFundingVout + 1) {
 		// The mempool counts here, unlike a reclaim: what matters is that
@@ -163,24 +178,18 @@ func (r *Runtime) landDeposit(ctx context.Context, t *table, seat uint32, rec sp
 		// later, by whatever decision needs them.
 		out, err := r.bridge.UnconfirmedOutpoint(ctx, rec.TxID, vout)
 		if err != nil {
-			return fmt.Errorf("look for the %s output: %w", rec.Purpose, err)
+			return staked{}, fmt.Errorf("look for the %s output: %w", rec.Purpose, err)
 		}
 		if !out.Found || !strings.EqualFold(out.PkScriptHex, rec.PkScript) {
 			continue
 		}
 		outpoint := fmt.Sprintf("%s:%d", rec.TxID, vout)
 		if _, err := r.book.Locate(rec.ID, outpoint); err != nil {
-			return err
+			return staked{}, err
 		}
-		r.mu.Lock()
-		if t.funded == nil {
-			t.funded = map[uint32]staked{}
-		}
-		t.funded[seat] = staked{outpoint: outpoint, atoms: out.ValueAtoms}
-		r.mu.Unlock()
-		return nil
+		return staked{outpoint: outpoint, atoms: out.ValueAtoms}, nil
 	}
-	return fmt.Errorf("%s %s pays no output with the script that was asked for; "+
+	return staked{}, fmt.Errorf("%s %s pays no output with the script that was asked for; "+
 		"the money moved but not to this table", rec.Purpose, rec.TxID)
 }
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/txscript/v4/stdaddr"
 	"github.com/decred/dcrd/wire"
 	"github.com/decred/slog"
@@ -42,6 +43,10 @@ type Config struct {
 	// Params is the chain the game is playing on. Required: every script
 	// and address is built against it.
 	Params stdaddr.AddressParams
+	// PunishTag is the game's own domain tag for punishment-key
+	// announcements. Frozen like SeatTags, and the game's to state.
+	// Optional: a game with no forfeitable bonds needs none.
+	PunishTag []byte
 	// SeatTags are the game's own domain-separation tags for those keys.
 	// Required, and the game's to state: they are frozen hash inputs that
 	// decide which keys a seat has, so the SDK must not invent them.
@@ -55,14 +60,15 @@ type Config struct {
 //
 // A game hands it [Rules] and calls [Game] methods; it never drives.
 type Runtime struct {
-	rules    Rules
-	bridge   *transport.Bridge
-	book     *spend.Book
-	identity *identity.Identity
-	seatTags identity.SeatTags
-	params   stdaddr.AddressParams
-	router   *transport.Router
-	log      slog.Logger
+	rules     Rules
+	bridge    *transport.Bridge
+	book      *spend.Book
+	identity  *identity.Identity
+	seatTags  identity.SeatTags
+	params    stdaddr.AddressParams
+	punishTag []byte
+	router    *transport.Router
+	log       slog.Logger
 
 	// sweepMu guards what this process has broadcast a spend of. Its own
 	// lock because it is consulted from the reclaim path while the table
@@ -96,6 +102,13 @@ type table struct {
 
 	// settle gathers signatures on this table's payout.
 	settle *settlement
+
+	// punishPubs is every seat's announced punishment key, and punish is
+	// ours. forfeitBonds are derived once every seat has announced.
+	punishPubs    map[uint32][]byte
+	punish        *secp256k1.PrivateKey
+	forfeitBonds  map[uint32]membership.ForfeitableBond
+	forfeitFunded map[uint32]staked
 }
 
 // settlement is one table's payout, part-signed.
@@ -142,9 +155,10 @@ func New(cfg Config) (*Runtime, error) {
 	r := &Runtime{
 		rules: cfg.Rules, bridge: cfg.Bridge, book: cfg.Book, log: log,
 		identity: cfg.Identity, seatTags: cfg.SeatTags, params: cfg.Params,
-		tables: map[string]*table{},
-		names:  map[string]string{},
-		runCtx: context.Background(),
+		punishTag: cfg.PunishTag,
+		tables:    map[string]*table{},
+		names:     map[string]string{},
+		runCtx:    context.Background(),
 	}
 	// Built here rather than when Run starts, so a game that acts before the
 	// loop is up finds a router instead of a race.
@@ -196,7 +210,7 @@ func (r *Runtime) deliver(d transport.Delivery) {
 // which is why the set is small, fixed, and documented.
 func (r *Runtime) ours(k schema.Kind) bool {
 	switch k {
-	case schema.KindJoin, schema.KindCommit, schema.KindSettle:
+	case schema.KindJoin, schema.KindCommit, schema.KindSettle, KindPunishKey:
 		return true
 	}
 	return false
@@ -231,6 +245,13 @@ func (r *Runtime) handleOurs(ctx context.Context, msg Message) error {
 			return fmt.Errorf("read a payout: %w", err)
 		}
 		return r.adoptSettlement(ctx, msg.Match, st)
+
+	case KindPunishKey:
+		var n membership.PunishNote
+		if err := json.Unmarshal(msg.Body, &n); err != nil {
+			return fmt.Errorf("read a punishment-key announcement: %w", err)
+		}
+		return r.adoptPunishKey(ctx, msg.Match, n)
 	}
 	return nil
 }
