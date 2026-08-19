@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
@@ -244,9 +243,9 @@ func TestAMalformedRulingIsRefusedBeforeAnythingIsSpent(t *testing.T) {
 	if err := rt.Forfeit(ctx, ruling.Ruling{Kind: ruling.Equivocation}); err == nil {
 		t.Fatal("accepted an equivocation ruling with no proof")
 	}
-	err := rt.Forfeit(ctx, ruling.Ruling{Match: "m1", Kind: ruling.Clean})
-	if !errors.Is(err, ErrNotYet) {
-		t.Fatalf("a well-formed ruling failed for the wrong reason: %v", err)
+	// Well formed, but for a table this game is not at.
+	if err := rt.Forfeit(ctx, ruling.Ruling{Match: "m1", Kind: ruling.Clean}); err == nil {
+		t.Fatal("carried out a ruling at a table this game is not at")
 	}
 }
 

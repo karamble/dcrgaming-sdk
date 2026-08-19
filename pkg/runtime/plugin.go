@@ -198,7 +198,7 @@ func (r *Runtime) Forfeit(ctx context.Context, rl ruling.Ruling) error {
 		// is an exchange this runtime does not carry out yet.
 		return fmt.Errorf("running the claim ladder: %w", ErrNotYet)
 	case ruling.Clean:
-		return fmt.Errorf("releasing a bond cooperatively: %w", ErrNotYet)
+		return r.releaseTableBond(ctx, rl.Match)
 	}
 	return fmt.Errorf("this runtime does not know how to carry out a %s ruling", rl.Kind)
 }

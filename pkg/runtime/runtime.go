@@ -105,10 +105,12 @@ type table struct {
 
 	// punishPubs is every seat's announced punishment key, and punish is
 	// ours. forfeitBonds are derived once every seat has announced.
-	punishPubs    map[uint32][]byte
-	punish        *secp256k1.PrivateKey
-	forfeitBonds  map[uint32]membership.ForfeitableBond
-	forfeitFunded map[uint32]staked
+	punishPubs      map[uint32][]byte
+	punish          *secp256k1.PrivateKey
+	forfeitBonds    map[uint32]membership.ForfeitableBond
+	forfeitFunded   map[uint32]staked
+	tableBondFunded map[uint32]staked
+	release         *release
 }
 
 // settlement is one table's payout, part-signed.
@@ -210,7 +212,7 @@ func (r *Runtime) deliver(d transport.Delivery) {
 // which is why the set is small, fixed, and documented.
 func (r *Runtime) ours(k schema.Kind) bool {
 	switch k {
-	case schema.KindJoin, schema.KindCommit, schema.KindSettle, KindPunishKey:
+	case schema.KindJoin, schema.KindCommit, schema.KindSettle, KindPunishKey, KindRelease:
 		return true
 	}
 	return false
@@ -252,6 +254,13 @@ func (r *Runtime) handleOurs(ctx context.Context, msg Message) error {
 			return fmt.Errorf("read a punishment-key announcement: %w", err)
 		}
 		return r.adoptPunishKey(ctx, msg.Match, n)
+
+	case KindRelease:
+		var rel schema.Release
+		if err := json.Unmarshal(msg.Body, &rel); err != nil {
+			return fmt.Errorf("read a release: %w", err)
+		}
+		return r.adoptRelease(ctx, msg.Match, rel)
 	}
 	return nil
 }
