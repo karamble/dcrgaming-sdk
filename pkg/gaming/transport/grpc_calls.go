@@ -118,16 +118,22 @@ func (c *Bridge) SpendStatus(ctx context.Context, id string) (Spend, error) {
 // Polling is the answer of record even though the stream carries a hint that a
 // request settled: the hint can be missed, and a game that trusted it would
 // wait forever on the one that was.
+//
+// A bridge that cannot be reached does not end the wait. Not being able to ask
+// is not an answer - the payment may have been made while the question was in
+// flight, and a caller handed that error could mistake it for a refusal and stop
+// watching money that was already paid. Only an answer, or the caller's own
+// context, ends this. Give it a deadline if you need one.
 func (c *Bridge) AwaitSpend(ctx context.Context, id string) (Spend, error) {
 	ticker := time.NewTicker(spendPoll)
 	defer ticker.Stop()
 
 	for {
 		spend, err := c.SpendStatus(ctx, id)
-		if err != nil {
+		switch {
+		case err != nil && !Unreachable(err):
 			return Spend{}, err
-		}
-		if spend.Settled() {
+		case err == nil && spend.Settled():
 			return spend, nil
 		}
 		select {
