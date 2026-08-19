@@ -226,10 +226,23 @@ func (r *Runtime) publishJoin(ctx context.Context, match string) error {
 
 // send puts one message to a table's group chat.
 func (r *Runtime) send(ctx context.Context, t *table, kind schema.Kind, body any) error {
-	// ClassForm, because formation traffic has to outlive a relay backlog:
-	// a join queued behind one and expiring in transit forms one table and
-	// aborts the other.
-	return r.router.Send(ctx, t.gCID(), t.match, t.match, kind, body, wire.ClassForm)
+	return r.router.Send(ctx, t.gCID(), t.match, t.match, kind, body, classOf(kind))
+}
+
+// classOf is how long one of the runtime's messages stays worth delivering.
+//
+// Formation traffic has to outlive a relay backlog: a join queued behind one
+// and expiring in transit forms one table and aborts the other, which is a
+// thing that happened. Everything else is state sync - where the money went,
+// where to pay it, a signature on the payout - and a stale one of those is
+// worse than none, because it describes a table that has moved on. Each is
+// repeated while it still matters, so a short life costs nothing.
+func classOf(kind schema.Kind) wire.Class {
+	switch kind {
+	case schema.KindJoin, schema.KindCommit, KindRoster, KindResync, KindResyncReply:
+		return wire.ClassForm
+	}
+	return wire.ClassState
 }
 
 func (t *table) gCID() string { return t.gcID }

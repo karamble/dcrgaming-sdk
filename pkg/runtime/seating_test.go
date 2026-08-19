@@ -12,6 +12,7 @@ import (
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/gamingpb"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/transport"
+	"github.com/karamble/dcrgaming-sdk/pkg/gaming/wire"
 	"github.com/karamble/dcrgaming-sdk/pkg/identity"
 	"github.com/karamble/dcrgaming-sdk/pkg/spend"
 )
@@ -263,5 +264,34 @@ func TestASeatWithNoBondCannotJoin(t *testing.T) {
 	// developer what to do about it - so that is what is pinned.
 	if !strings.Contains(err.Error(), "fund one before joining a table") {
 		t.Fatalf("refused without telling the developer what to do: %v", err)
+	}
+}
+
+// Formation traffic outlives a relay backlog and nothing else does.
+//
+// A join queued behind a backlog and expiring in transit forms one table and
+// aborts the other. Everything else describes where money is right now, is
+// repeated while it still matters, and is worse than useless once stale.
+func TestFormationOutlivesABacklogAndTheRestDoesNot(t *testing.T) {
+	for _, kind := range []schema.Kind{
+		schema.KindJoin, schema.KindCommit, KindRoster, KindResync, KindResyncReply,
+	} {
+		if got := classOf(kind); got != wire.ClassForm {
+			t.Errorf("%s is sent as class %v, and formation has to outlive a backlog", kind, got)
+		}
+	}
+	for _, kind := range []schema.Kind{
+		KindFunded, KindBonded, KindPayout, schema.KindSettle, KindRelease, KindAccusation,
+		KindPunishKey,
+	} {
+		if got := classOf(kind); got != wire.ClassState {
+			t.Errorf("%s is sent as class %v, and a stale one describes a table that has moved on",
+				kind, got)
+		}
+	}
+	// Every kind the runtime sends is named above, so a new one cannot be
+	// added without deciding how long it should live.
+	if got := classOf("something-nobody-added-here"); got != wire.ClassState {
+		t.Errorf("an unnamed kind defaults to %v", got)
 	}
 }
