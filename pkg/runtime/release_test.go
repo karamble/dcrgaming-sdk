@@ -11,6 +11,7 @@ import (
 	"github.com/karamble/dcrgaming-sdk/pkg/escrow"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/bridgetest"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
+	"github.com/karamble/dcrgaming-sdk/pkg/punish"
 	"github.com/karamble/dcrgaming-sdk/pkg/ruling"
 )
 
@@ -60,7 +61,8 @@ func TestATableBondBothSeatsSignGoesHome(t *testing.T) {
 		t.Fatalf("release: %v", err)
 	}
 	rt.mu.Lock()
-	rel := rt.tables[sid].release
+	mine, _ := rt.tables[sid].form.OurSeat()
+	rel := rt.tables[sid].releases[mine]
 	sent := rel.done
 	rt.mu.Unlock()
 	if sent {
@@ -74,15 +76,21 @@ func TestATableBondBothSeatsSignGoesHome(t *testing.T) {
 	}
 	theirSeat, _ := them.form.OurSeat()
 	seats, _ := them.form.Seats()
+	// Named the way a real peer names it: whose bond, and the transaction
+	// itself, so the receiver rebuilds what it is being asked to agree with
+	// rather than believing it.
+	raw, err := rel.tx.Bytes()
+	if err != nil {
+		t.Fatalf("serialise: %v", err)
+	}
 	body := schema.Release{
+		Seat: ourSeatOf(t, rt, sid), Tx: hex.EncodeToString(raw),
 		Signer: hex.EncodeToString(seats[theirSeat]), Sig: hex.EncodeToString(sig),
 	}
 	if err := rt.adoptRelease(context.Background(), sid, body); err != nil {
 		t.Fatalf("adopt: %v", err)
 	}
-	rt.mu.Lock()
-	sent = rt.tables[sid].release.done
-	rt.mu.Unlock()
+	sent = ourRelease(rt, sid).done
 	if !sent {
 		t.Fatal("a fully signed release was not sent")
 	}
@@ -97,9 +105,7 @@ func TestAReleaseIsNotSentShortOfASignature(t *testing.T) {
 	if err := rt.Forfeit(context.Background(), ruling.Ruling{Match: sid, Kind: ruling.Clean}); err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	rt.mu.Lock()
-	done := rt.tables[sid].release.done
-	rt.mu.Unlock()
+	done := ourRelease(rt, sid).done
 	if done {
 		t.Fatal("a release short of a signature was sent")
 	}
@@ -108,9 +114,7 @@ func TestAReleaseIsNotSentShortOfASignature(t *testing.T) {
 	if err := rt.BackstopRelease(context.Background(), sid); err != nil {
 		t.Fatalf("backstop: %v", err)
 	}
-	rt.mu.Lock()
-	done = rt.tables[sid].release.done
-	rt.mu.Unlock()
+	done = ourRelease(rt, sid).done
 	if !done {
 		t.Fatal("the backstop did not send")
 	}
@@ -142,9 +146,10 @@ func TestAReleaseAlreadySentIsNotSentAgain(t *testing.T) {
 	sid, _ := seatTwo(t, fake, rt)
 	rt.mu.Lock()
 	tbl := rt.tables[sid]
-	tbl.release = &release{done: true}
+	mine, _ := tbl.form.OurSeat()
+	tbl.releases = map[uint32]*release{mine: {seat: mine, done: true}}
 	rt.mu.Unlock()
-	if err := rt.completeRelease(context.Background(), tbl); err != nil {
+	if err := rt.completeRelease(context.Background(), tbl, mine); err != nil {
 		t.Fatalf("completing a finished release: %v", err)
 	}
 }
@@ -180,10 +185,74 @@ func TestAStrangersReleaseSignatureIsRefused(t *testing.T) {
 	if !strings.Contains(err.Error(), "not at this table") {
 		t.Fatalf("refused for the wrong reason: %v", err)
 	}
-	rt.mu.Lock()
-	done := rt.tables[sid].release.done
-	rt.mu.Unlock()
+	done := ourRelease(rt, sid).done
 	if done {
 		t.Fatal("a stranger's signature completed a release")
+	}
+}
+
+// ourRelease is this seat's own release at a table.
+func ourRelease(rt *Runtime, sid string) *release {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	t := rt.tables[sid]
+	mine, _ := t.form.OurSeat()
+	return t.releases[mine]
+}
+
+// A release nobody would have built is refused, not signed.
+//
+// This is the guard the whole exchange rests on. A release is co-signed by the
+// other seat, so a seat that could get its opponent to sign an arbitrary
+// transaction spending a bond has been handed the bond: it would name itself
+// as the payee and walk away with money it never staked. The transaction is
+// therefore rebuilt from what this peer knows and compared, rather than signed
+// because it arrived.
+func TestAReleaseThisPeerWouldNotHaveBuiltIsRefused(t *testing.T) {
+	fake, rt, _ := stand(t, &trivialGame{})
+	sid, them := readyToRelease(t, rt, fake)
+	mine := ourSeatOf(t, rt, sid)
+	tbl := tableOf(t, rt, sid)
+
+	draft, err := rt.releaseDraft(tbl, mine)
+	if err != nil {
+		t.Fatalf("draft: %v", err)
+	}
+	honest, err := punish.BuildRelease(draft)
+	if err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	// The same release paying a penny less, which is to say paying a penny
+	// more to whoever mines it - and nothing this peer agreed to.
+	forged := honest.Copy()
+	forged.TxOut[0].Value--
+	raw, err := forged.Bytes()
+	if err != nil {
+		t.Fatalf("serialise: %v", err)
+	}
+	theirSeat, _ := them.form.OurSeat()
+	seats, _ := tbl.form.Seats()
+	sig, err := escrow.SignBondSpend(forged, draft.Bond, them.creds.Session)
+	if err != nil {
+		t.Fatalf("their signature: %v", err)
+	}
+	err = rt.adoptRelease(context.Background(), sid, schema.Release{
+		Seat: mine, Tx: hex.EncodeToString(raw),
+		Signer: hex.EncodeToString(seats[theirSeat]), Sig: hex.EncodeToString(sig),
+	})
+	if err == nil {
+		t.Fatal("took a signature on a release this peer would not have built")
+	}
+	if !strings.Contains(err.Error(), "would not have built") {
+		t.Fatalf("refused for the wrong reason: %v", err)
+	}
+	// And nothing was kept: a refused release must not leave a half-signed
+	// one behind for the next message to finish.
+	rt.mu.Lock()
+	held := tbl.releases[mine]
+	rt.mu.Unlock()
+	if held != nil {
+		t.Fatal("a refused release was filed anyway")
 	}
 }

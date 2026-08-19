@@ -152,7 +152,11 @@ type table struct {
 	forfeitBonds    map[uint32]membership.ForfeitableBond
 	forfeitFunded   map[uint32]staked
 	tableBondFunded map[uint32]staked
-	release         *release
+	// releases are the table bonds going home cooperatively, by the seat
+	// each one pays. Both of them: a release pays its owner and nobody
+	// else, so the two seats' releases are different transactions and each
+	// needs the other's signature.
+	releases map[uint32]*release
 	// ladders are the accusation chains this table has built, by the seat
 	// each one accuses. Both of them: the one against the opponent is the
 	// one this peer may run, and the one against itself is the one it must

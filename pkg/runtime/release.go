@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"strings"
 
 	"github.com/decred/dcrd/wire"
 
@@ -105,10 +106,13 @@ func (r *Runtime) releaseTableBond(ctx context.Context, match string) error {
 
 	seats, _ := t.form.Seats()
 	r.mu.Lock()
-	if t.release == nil {
-		t.release = &release{tx: tx, draft: draft, sigs: map[string][]byte{}}
+	if t.releases == nil {
+		t.releases = map[uint32]*release{}
 	}
-	t.release.sigs[hex.EncodeToString(seats[mine])] = sig
+	if t.releases[mine] == nil {
+		t.releases[mine] = &release{seat: mine, tx: tx, draft: draft, sigs: map[string][]byte{}}
+	}
+	t.releases[mine].sigs[hex.EncodeToString(seats[mine])] = sig
 	r.mu.Unlock()
 
 	raw, err := tx.Bytes()
@@ -116,13 +120,13 @@ func (r *Runtime) releaseTableBond(ctx context.Context, match string) error {
 		return err
 	}
 	body := schema.Release{
-		Tx: hex.EncodeToString(raw), Signer: hex.EncodeToString(seats[mine]),
+		Seat: mine, Tx: hex.EncodeToString(raw), Signer: hex.EncodeToString(seats[mine]),
 		Sig: hex.EncodeToString(sig),
 	}
 	if err := r.send(ctx, t, KindRelease, body); err != nil {
 		return fmt.Errorf("tell the table about the release: %w", err)
 	}
-	return r.completeRelease(ctx, t)
+	return r.completeRelease(ctx, t, mine)
 }
 
 // releaseDraft is this seat's table bond going home.
@@ -155,13 +159,21 @@ func (r *Runtime) releaseDraft(t *table, seat uint32) (punish.Release, error) {
 	}, nil
 }
 
-// adoptRelease takes the other seat's signature on a release.
+// adoptRelease co-signs another seat's release, or takes their signature on
+// this seat's.
+//
+// Which of the two it is comes from the seat the message names, and both are
+// ordinary: a table ends for everybody at once, so both seats release at the
+// same moment and each holds two conversations - its own release waiting for
+// the other's signature, and the other's waiting for its own.
+//
+// The transaction is rebuilt here rather than believed. A release names where
+// it pays, and a seat that could get its opponent to sign an arbitrary
+// transaction spending a bond has been handed the bond.
 func (r *Runtime) adoptRelease(ctx context.Context, match string, body schema.Release) error {
-	r.mu.Lock()
-	t, ok := r.tables[match]
-	r.mu.Unlock()
-	if !ok {
-		return fmt.Errorf("no table %q", match)
+	t, mine, err := r.ourSeatAt(match)
+	if err != nil {
+		return err
 	}
 	seats, ok := t.form.Seats()
 	if !ok {
@@ -171,29 +183,72 @@ func (r *Runtime) adoptRelease(ctx context.Context, match string, body schema.Re
 	if err != nil || !seatedKey(seats, signer) {
 		return fmt.Errorf("a release was signed by somebody who is not at this table")
 	}
-	r.mu.Lock()
-	held := t.release
-	r.mu.Unlock()
-	if held == nil {
-		return fmt.Errorf("no release has been proposed at this table, so there is nothing to agree with")
-	}
-	// The transaction is this peer's own: a release pays its owner and
-	// nobody else, so there is nothing to negotiate and nothing to compare
-	// beyond the signature itself.
 	sig, err := hex.DecodeString(body.Sig)
 	if err != nil || len(sig) == 0 {
 		return fmt.Errorf("a release signature is not usable")
 	}
+
+	// What this peer would have built for that seat, which is what it is
+	// willing to sign. Anything else is refused rather than signed.
+	draft, err := r.releaseDraft(t, body.Seat)
+	if err != nil {
+		return err
+	}
+	want, err := punish.BuildRelease(draft)
+	if err != nil {
+		return fmt.Errorf("build seat %d's release: %w", body.Seat, err)
+	}
+	raw, err := want.Bytes()
+	if err != nil {
+		return err
+	}
+	if !strings.EqualFold(hex.EncodeToString(raw), body.Tx) {
+		return fmt.Errorf(
+			"seat %d proposed a release this peer would not have built, and it was not signed", body.Seat)
+	}
+
 	r.mu.Lock()
+	if t.releases == nil {
+		t.releases = map[uint32]*release{}
+	}
+	held := t.releases[body.Seat]
+	if held == nil {
+		held = &release{seat: body.Seat, tx: want, draft: draft, sigs: map[string][]byte{}}
+		t.releases[body.Seat] = held
+	}
 	held.sigs[body.Signer] = sig
+	_, alsoOurs := held.sigs[hex.EncodeToString(seats[mine])]
 	r.mu.Unlock()
-	return r.completeRelease(ctx, t)
+
+	// Somebody else's release still needs this seat's signature on it, and
+	// this is the moment to give it: the bond is theirs, it pays only them,
+	// and withholding costs them a wait and gains nothing.
+	if body.Seat != mine && !alsoOurs {
+		session, _, err := r.seatKeys(t.form.Terms().SID)
+		if err != nil {
+			return err
+		}
+		ours, err := escrow.SignBondSpend(want, draft.Bond, session)
+		if err != nil {
+			return fmt.Errorf("sign seat %d's release: %w", body.Seat, err)
+		}
+		r.mu.Lock()
+		held.sigs[hex.EncodeToString(seats[mine])] = ours
+		r.mu.Unlock()
+		if err := r.send(ctx, t, KindRelease, schema.Release{
+			Seat: body.Seat, Tx: body.Tx, Signer: hex.EncodeToString(seats[mine]),
+			Sig: hex.EncodeToString(ours),
+		}); err != nil {
+			return fmt.Errorf("tell the table about the release: %w", err)
+		}
+	}
+	return r.completeRelease(ctx, t, body.Seat)
 }
 
 // completeRelease sends the release once both seats have signed.
-func (r *Runtime) completeRelease(ctx context.Context, t *table) error {
+func (r *Runtime) completeRelease(ctx context.Context, t *table, seat uint32) error {
 	r.mu.Lock()
-	rel := t.release
+	rel := t.releases[seat]
 	if rel == nil || rel.done {
 		r.mu.Unlock()
 		return nil
@@ -219,7 +274,7 @@ func (r *Runtime) completeRelease(ctx context.Context, t *table) error {
 	if err != nil {
 		return fmt.Errorf("a fully signed release did not satisfy the bond: %w", err)
 	}
-	return r.sendRelease(ctx, t, final)
+	return r.sendRelease(ctx, t, seat, final)
 }
 
 // BackstopRelease takes this seat's own table bond home alone, once the lock
@@ -244,13 +299,13 @@ func (r *Runtime) BackstopRelease(ctx context.Context, match string) error {
 	if err != nil {
 		return fmt.Errorf("build the backstop: %w", err)
 	}
-	return r.sendRelease(ctx, t, tx)
+	return r.sendRelease(ctx, t, mine, tx)
 }
 
 // sendRelease broadcasts a finished release, once.
-func (r *Runtime) sendRelease(ctx context.Context, t *table, tx *wire.MsgTx) error {
+func (r *Runtime) sendRelease(ctx context.Context, t *table, seat uint32, tx *wire.MsgTx) error {
 	r.mu.Lock()
-	rel := t.release
+	rel := t.releases[seat]
 	if rel != nil {
 		if rel.done {
 			r.mu.Unlock()
@@ -274,6 +329,7 @@ func (r *Runtime) sendRelease(ctx context.Context, t *table, tx *wire.MsgTx) err
 
 // release is a table bond going home cooperatively, part-signed.
 type release struct {
+	seat  uint32
 	tx    *wire.MsgTx
 	draft punish.Release
 	sigs  map[string][]byte

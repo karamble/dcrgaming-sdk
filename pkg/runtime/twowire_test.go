@@ -935,3 +935,119 @@ func settlementDone(rt *Runtime, sid string) bool {
 	t, ok := rt.tables[sid]
 	return ok && t.settle != nil && t.settle.done
 }
+
+// Both seats get their table bond back, over the wire.
+//
+// A release is the cooperative way out: the bond goes home now rather than
+// when its lock matures. Each seat has its own - a release pays its owner and
+// nobody else - so there are two of them, and each needs the other seat's
+// signature. Two peers releasing at the same time is the ordinary case, not an
+// edge: a table ends for both of them at once.
+func TestBothSeatsGetTheirTableBondBack(t *testing.T) {
+	fake := bridgetest.New(bridgetest.Options{
+		Game: "battleships", Network: "mainnet",
+		Params: chaincfg.TestNet3Params(), Height: 800,
+	})
+	srv, err := fake.Serve("seat0", "seat1")
+	if err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	one := wireSeat(t, ctx, srv, "seat0")
+	two := wireSeat(t, ctx, srv, "seat1")
+	go func() { _ = one.Run(ctx) }()
+	go func() { _ = two.Run(ctx) }()
+	waitFor(t, "both seats subscribed", func() bool { return fake.Subscribers() == 2 })
+
+	link := invite(t, nil)
+	sid, err := accept(one, link, testGCID)
+	if err != nil {
+		t.Fatalf("first seat accepting: %v", err)
+	}
+	if _, err := accept(two, link, testGCID); err != nil {
+		t.Fatalf("second seat accepting: %v", err)
+	}
+	block := func() {
+		fake.Mine(1)
+		one.Tick(ctx, fake.Height())
+		two.Tick(ctx, fake.Height())
+	}
+	waitFor(t, "both sides seated", func() bool {
+		block()
+		_, a := one.Seats(sid)
+		_, b := two.Seats(sid)
+		return a && b
+	})
+
+	// A release pays its owner, so each seat has to have said where.
+	for name, rt := range map[string]*Runtime{"one": one, "two": two} {
+		if err := rt.setPayout(ctx, payTo(t)); err != nil {
+			t.Fatalf("%s's payout: %v", name, err)
+		}
+		if err := rt.FundTableBond(ctx, sid); err != nil {
+			t.Fatalf("%s's table bond: %v", name, err)
+		}
+	}
+	waitFor(t, "both bonds and both payouts to be known on both sides", func() bool {
+		block()
+		return bondsAndPayoutsKnown(one, sid) && bondsAndPayoutsKnown(two, sid)
+	})
+
+	// Both at once, which is what the end of a table looks like.
+	if err := one.releaseTableBond(ctx, sid); err != nil {
+		t.Fatalf("first seat releasing: %v", err)
+	}
+	if err := two.releaseTableBond(ctx, sid); err != nil {
+		t.Fatalf("second seat releasing: %v", err)
+	}
+
+	// Two releases, one per seat, each spending that seat's own bond.
+	waitFor(t, "both bonds to go home", func() bool {
+		block()
+		return len(fake.Broadcasts()) >= 2
+	})
+	sent := fake.Broadcasts()
+	if len(sent) != 2 {
+		t.Fatalf("%d transactions were broadcast, want one release per seat: %v", len(sent), sent)
+	}
+	for _, rt := range []*Runtime{one, two} {
+		if !releaseSent(rt, sid) {
+			t.Error("a seat does not know its own bond went home")
+		}
+	}
+}
+
+// bondsAndPayoutsKnown reports whether a peer knows every table bond and every
+// payout.
+func bondsAndPayoutsKnown(rt *Runtime, sid string) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	t, ok := rt.tables[sid]
+	if !ok || t.form == nil {
+		return false
+	}
+	seats, seated := t.form.Seats()
+	if !seated {
+		return false
+	}
+	return len(t.tableBondFunded) == len(seats) && len(t.payouts) == len(seats)
+}
+
+// releaseSent reports whether a peer has sent its own release.
+func releaseSent(rt *Runtime, sid string) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	t, ok := rt.tables[sid]
+	if !ok {
+		return false
+	}
+	mine, seated := t.form.OurSeat()
+	if !seated {
+		return false
+	}
+	rel, held := t.releases[mine]
+	return held && rel.done
+}
