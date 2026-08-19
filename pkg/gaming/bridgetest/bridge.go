@@ -106,6 +106,7 @@ type Bridge struct {
 	verdict Verdict
 	refusal string
 	states  []*gamingpb.GameState
+	replies []*gamingpb.RespondRequest
 
 	unreachable atomic.Bool
 	pushed      atomic.Int64
@@ -219,6 +220,17 @@ func (b *Bridge) Spends() map[string]*gamingpb.Spend {
 		out[k] = v
 	}
 	return out
+}
+
+// Replies returns every answer a game has sent to a control request.
+//
+// A bridge left waiting on a request nobody answered is a dashboard stuck on a
+// spinner, so a game's tests need to be able to see that it always replied -
+// including when the request failed.
+func (b *Bridge) Replies() []*gamingpb.RespondRequest {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]*gamingpb.RespondRequest(nil), b.replies...)
 }
 
 // States returns every game state reported to the bridge.
@@ -402,7 +414,10 @@ func (b *Bridge) Broadcast(_ context.Context, req *gamingpb.BroadcastRequest) (*
 	return &gamingpb.BroadcastReply{Txid: txid}, nil
 }
 
-func (b *Bridge) Respond(_ context.Context, _ *gamingpb.RespondRequest) (*gamingpb.RespondReply, error) {
+func (b *Bridge) Respond(_ context.Context, req *gamingpb.RespondRequest) (*gamingpb.RespondReply, error) {
+	b.mu.Lock()
+	b.replies = append(b.replies, req)
+	b.mu.Unlock()
 	return &gamingpb.RespondReply{}, nil
 }
 
