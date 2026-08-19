@@ -111,6 +111,7 @@ type table struct {
 	forfeitFunded   map[uint32]staked
 	tableBondFunded map[uint32]staked
 	release         *release
+	ladder          *ladder
 }
 
 // settlement is one table's payout, part-signed.
@@ -212,7 +213,7 @@ func (r *Runtime) deliver(d transport.Delivery) {
 // which is why the set is small, fixed, and documented.
 func (r *Runtime) ours(k schema.Kind) bool {
 	switch k {
-	case schema.KindJoin, schema.KindCommit, schema.KindSettle, KindPunishKey, KindRelease:
+	case schema.KindJoin, schema.KindCommit, schema.KindSettle, KindPunishKey, KindRelease, KindAccusation:
 		return true
 	}
 	return false
@@ -261,6 +262,13 @@ func (r *Runtime) handleOurs(ctx context.Context, msg Message) error {
 			return fmt.Errorf("read a release: %w", err)
 		}
 		return r.adoptRelease(ctx, msg.Match, rel)
+
+	case KindAccusation:
+		var a schema.Accusation
+		if err := json.Unmarshal(msg.Body, &a); err != nil {
+			return fmt.Errorf("read an accusation: %w", err)
+		}
+		return r.adoptAccusation(ctx, msg.Match, a)
 	}
 	return nil
 }

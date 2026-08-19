@@ -69,7 +69,7 @@ func (b *battleshipsRules) Terms(sid string) (membership.Terms, error) {
 	return membership.Terms{
 		Game: "battleships", GameVer: 1, SID: sid,
 		BuyInAtoms: 5_000_000, Seats: 2, CSVBlocks: 2048, Until: 900,
-		BondAtoms: escrow.MinBondAtoms, BondLockBlocks: 4032,
+		BondAtoms: escrow.MinBondAtoms, BondLockBlocks: 4032, AccuseFeeAtoms: 10_000,
 	}, nil
 }
 

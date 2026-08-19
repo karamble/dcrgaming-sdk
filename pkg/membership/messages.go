@@ -79,6 +79,14 @@ type Terms struct {
 	// for years. See Hash for why that case must stay byte-identical.
 	BondAtoms      uint64
 	BondLockBlocks uint32
+	// AccuseFeeAtoms is what one rung of an accusation chain pays.
+	//
+	// Agreed rather than a local constant because both seats build the same
+	// chain and a fee they disagreed on would give them different rungs -
+	// and a rung the other seat did not sign is a rung nobody can run. It
+	// also fixes the attrition bound, which is what a player is told before
+	// they bond.
+	AccuseFeeAtoms uint64
 }
 
 // Validate reports whether the terms could describe a table at all.
@@ -125,6 +133,9 @@ func (t Terms) Validate() error {
 			return fmt.Errorf("a bond lock of %d blocks is under the escrow floor of %d",
 				t.BondLockBlocks, escrow.MinBondBlocks)
 		}
+		if t.AccuseFeeAtoms == 0 {
+			return fmt.Errorf("a table with bonds must state what one rung of an accusation costs")
+		}
 	}
 	return nil
 }
@@ -153,12 +164,15 @@ func (t Terms) Hash() ([32]byte, error) {
 		b.Write(bondTermsTag)
 		_ = binary.Write(&b, binary.BigEndian, t.BondAtoms)
 		_ = binary.Write(&b, binary.BigEndian, t.BondLockBlocks)
+		_ = binary.Write(&b, binary.BigEndian, t.AccuseFeeAtoms)
 	}
 	return blake256.Sum256(b.Bytes()), nil
 }
 
 // bonded reports whether the table states bond terms at all.
-func (t Terms) bonded() bool { return t.BondAtoms != 0 || t.BondLockBlocks != 0 }
+func (t Terms) bonded() bool {
+	return t.BondAtoms != 0 || t.BondLockBlocks != 0 || t.AccuseFeeAtoms != 0
+}
 
 // Join is one player's claim to a seat, signed by the key it announces.
 //

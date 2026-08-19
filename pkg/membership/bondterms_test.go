@@ -44,6 +44,7 @@ func TestStatingBondTermsChangesTheDigest(t *testing.T) {
 	bonded := legacyTerms()
 	bonded.BondAtoms = escrow.MinBondAtoms
 	bonded.BondLockBlocks = 4032
+	bonded.AccuseFeeAtoms = 10_000
 	got, err := bonded.Hash()
 	if err != nil {
 		t.Fatalf("hash: %v", err)
@@ -59,6 +60,7 @@ func TestEveryBondTermIsInTheDigest(t *testing.T) {
 	base := legacyTerms()
 	base.BondAtoms = escrow.MinBondAtoms
 	base.BondLockBlocks = 4032
+	base.AccuseFeeAtoms = 10_000
 	h0, err := base.Hash()
 	if err != nil {
 		t.Fatalf("hash: %v", err)
@@ -70,6 +72,7 @@ func TestEveryBondTermIsInTheDigest(t *testing.T) {
 	}{
 		{"the amount", func(tm *Terms) { tm.BondAtoms = escrow.MinBondAtoms * 2 }},
 		{"the lock", func(tm *Terms) { tm.BondLockBlocks = 4033 }},
+		{"the accusation fee", func(tm *Terms) { tm.AccuseFeeAtoms = 20_000 }},
 	} {
 		other := base
 		tc.mut(&other)
@@ -91,18 +94,20 @@ func TestBondTermsComeInPairsAndClearTheEscrowFloors(t *testing.T) {
 		name   string
 		atoms  uint64
 		blocks uint32
+		fee    uint64
 		ok     bool
 	}{
-		{"neither, the legacy table", 0, 0, true},
-		{"battleships, above both floors", escrow.MinBondAtoms, 4032, true},
-		{"exactly on both floors", escrow.MinBondAtoms, escrow.MinBondBlocks, true},
-		{"an amount with no lock", escrow.MinBondAtoms, 0, false},
-		{"a lock with no amount", 0, 4032, false},
-		{"under the amount floor", escrow.MinBondAtoms - 1, 4032, false},
-		{"under the lock floor", escrow.MinBondAtoms, escrow.MinBondBlocks - 1, false},
+		{"neither, the legacy table", 0, 0, 0, true},
+		{"battleships, above both floors", escrow.MinBondAtoms, 4032, 10_000, true},
+		{"exactly on both floors", escrow.MinBondAtoms, escrow.MinBondBlocks, 10_000, true},
+		{"an amount with no lock", escrow.MinBondAtoms, 0, 10_000, false},
+		{"a lock with no amount", 0, 4032, 10_000, false},
+		{"under the amount floor", escrow.MinBondAtoms - 1, 4032, 10_000, false},
+		{"under the lock floor", escrow.MinBondAtoms, escrow.MinBondBlocks - 1, 10_000, false},
+		{"bonds but no accusation fee", escrow.MinBondAtoms, 4032, 0, false},
 	} {
 		tm := legacyTerms()
-		tm.BondAtoms, tm.BondLockBlocks = tc.atoms, tc.blocks
+		tm.BondAtoms, tm.BondLockBlocks, tm.AccuseFeeAtoms = tc.atoms, tc.blocks, tc.fee
 		err := tm.Validate()
 		if tc.ok && err != nil {
 			t.Errorf("%s: refused good terms: %v", tc.name, err)
@@ -120,15 +125,17 @@ func TestBothGamesBondTermsAreExpressible(t *testing.T) {
 		game   string
 		atoms  uint64
 		blocks uint32
+		fee    uint64
 	}{
 		// dcrpoker states none and uses the escrow floors directly.
-		{"poker", 0, 0},
-		// battleships: TableBondAtoms is the escrow floor, its lock is 4032.
-		{"battleships", escrow.MinBondAtoms, 4032},
+		{"poker", 0, 0, 0},
+		// battleships: TableBondAtoms is the escrow floor, lock 4032,
+		// AccuseFeeAtoms 10,000.
+		{"battleships", escrow.MinBondAtoms, 4032, 10_000},
 	} {
 		tm := legacyTerms()
 		tm.Game = tc.game
-		tm.BondAtoms, tm.BondLockBlocks = tc.atoms, tc.blocks
+		tm.BondAtoms, tm.BondLockBlocks, tm.AccuseFeeAtoms = tc.atoms, tc.blocks, tc.fee
 		if err := tm.Validate(); err != nil {
 			t.Errorf("%s: %v", tc.game, err)
 		}

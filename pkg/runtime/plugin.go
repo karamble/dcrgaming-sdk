@@ -194,9 +194,7 @@ func (r *Runtime) Forfeit(ctx context.Context, rl ruling.Ruling) error {
 		}
 		return r.sweepForfeited(ctx, rl, recovered)
 	case ruling.Silence:
-		// The ladder is pre-signed at bonding and run rung by rung, which
-		// is an exchange this runtime does not carry out yet.
-		return fmt.Errorf("running the claim ladder: %w", ErrNotYet)
+		return r.runLadder(ctx, rl.Match, rl.Against)
 	case ruling.Clean:
 		return r.releaseTableBond(ctx, rl.Match)
 	}
