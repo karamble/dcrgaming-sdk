@@ -170,11 +170,16 @@ func (r *Runtime) gameState(ctx context.Context) (st *gamingpb.GameState) {
 	return st
 }
 
-// Forfeit carries out a ruling. Forfeiture is T-12.
+// Forfeit carries out a ruling the game has made.
 //
-// The ruling is checked here even though the stage is not built: a game
-// integrating against the runtime should find out now that its ruling is
-// malformed, not later when a bond is on the line.
+// An equivocation ruling is checked here before anything is spent - the key
+// either falls out of the two signatures or it does not, so a game cannot cause
+// a bond to be swept by asserting that someone cheated. A silence ruling is
+// taken at the game's word, because the ladder gives the accused an on-chain
+// right of reply and the SDK has no vocabulary for what was owed.
+//
+// The mechanism itself is pkg/punish and pkg/evidence. What is still missing is
+// the table's forfeitable-bond records, which arrive with the funding stage.
 func (r *Runtime) Forfeit(_ context.Context, rl ruling.Ruling) error {
 	if err := rl.Validate(); err != nil {
 		return err
