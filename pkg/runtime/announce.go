@@ -560,6 +560,20 @@ func (r *Runtime) repeatAnnouncements(ctx context.Context, t *table) {
 			r.log.Debugf("table %s: repeating the payout: %v", t.match, err)
 		}
 	}
+	// Both chains, as soon as both bonds are on the chain to build them
+	// over. Not left to the game: it needs nothing the game knows, and a
+	// game that forgot has a table where silence has no remedy - which
+	// nobody discovers until somebody goes quiet.
+	if bondedAll {
+		r.mu.Lock()
+		built := len(t.ladders) > 0
+		r.mu.Unlock()
+		if !built {
+			if err := r.PresignLadder(ctx, t.match); err != nil {
+				r.log.Debugf("table %s: building the accusation chains: %v", t.match, err)
+			}
+		}
+	}
 	r.repeatLadders(ctx, t)
 
 	// The payout, while it is still short of somebody. A settlement one
