@@ -376,3 +376,83 @@ type countingGame struct {
 }
 
 func (c *countingGame) Handle(context.Context, Message) error { c.seen++; return nil }
+
+// A request that ran past the console's deadline is still answered. It is the
+// one whose answer matters most - something slow happened - and sending the
+// reply on the expired context would fail before it left the process.
+func TestAnAnswerOutlivesTheDeadlineTheRequestCarried(t *testing.T) {
+	fake, rt, _ := stand(t, &trivialGame{})
+	req := &gamingpb.BridgeRequest{
+		RequestId:    "late",
+		DeadlineUnix: 1, // 1970: long gone
+		Req:          &gamingpb.BridgeRequest_RefreshState{RefreshState: &gamingpb.RefreshState{}},
+	}
+	rt.answer(context.Background(), req)
+
+	var got *gamingpb.RespondRequest
+	for _, rep := range fake.Replies() {
+		if rep.GetRequestId() == "late" {
+			got = rep
+		}
+	}
+	if got == nil {
+		t.Fatal("the request went unanswered, so the console waits forever")
+	}
+}
+
+// The state that answers a refresh names the refresh it answers. The proto says
+// request_id is set only then, so without it the console cannot tell this from
+// an unsolicited report and has no way to retire the one it asked for.
+func TestAStateReplyNamesTheRefreshItAnswers(t *testing.T) {
+	_, rt, _ := stand(t, &trivialGame{})
+	reply := &gamingpb.RespondRequest{RequestId: "r7"}
+	err := rt.doRequest(context.Background(), &gamingpb.BridgeRequest{
+		RequestId: "r7",
+		Req:       &gamingpb.BridgeRequest_RefreshState{RefreshState: &gamingpb.RefreshState{}},
+	}, reply)
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	st, ok := reply.GetResult().(*gamingpb.RespondRequest_State)
+	if !ok {
+		t.Fatalf("a refresh answered with %T", reply.GetResult())
+	}
+	if st.State.GetRequestId() != "r7" {
+		t.Fatalf("the state names %q, not the refresh that asked for it", st.State.GetRequestId())
+	}
+}
+
+// A reclaim is not bounded by the console's deadline; every other request is.
+//
+// A reclaim signs and broadcasts real coin. Cutting one off half way because
+// somebody closed a tab leaves money moving with nobody watching it.
+func TestOnlyAReclaimOutrunsTheConsolesDeadline(t *testing.T) {
+	soon := time.Now().Add(time.Hour).Unix()
+	at := func(r *gamingpb.BridgeRequest) *gamingpb.BridgeRequest {
+		r.DeadlineUnix = soon
+		return r
+	}
+	for _, tc := range []struct {
+		name  string
+		req   *gamingpb.BridgeRequest
+		bound bool
+	}{
+		{"reclaim", at(&gamingpb.BridgeRequest{Req: &gamingpb.BridgeRequest_Reclaim{
+			Reclaim: &gamingpb.Reclaim{Kind: gamingpb.Reclaim_BOND, DestAddr: "Ts"}}}), false},
+		{"accept an invite", at(&gamingpb.BridgeRequest{Req: &gamingpb.BridgeRequest_AcceptInvite{
+			AcceptInvite: &gamingpb.AcceptInvite{}}}), true},
+		{"report state", at(&gamingpb.BridgeRequest{Req: &gamingpb.BridgeRequest_RefreshState{
+			RefreshState: &gamingpb.RefreshState{}}}), true},
+		{"set the payout address", at(&gamingpb.BridgeRequest{Req: &gamingpb.BridgeRequest_SetPayout{
+			SetPayout: &gamingpb.SetPayoutAddress{}}}), true},
+		{"set the names", at(&gamingpb.BridgeRequest{Req: &gamingpb.BridgeRequest_SetNames{
+			SetNames: &gamingpb.SetNames{}}}), true},
+	} {
+		ctx, cancel := ctxFor(context.Background(), tc.req)
+		_, has := ctx.Deadline()
+		cancel()
+		if has != tc.bound {
+			t.Errorf("%s: bounded by the deadline = %v, want %v", tc.name, has, tc.bound)
+		}
+	}
+}

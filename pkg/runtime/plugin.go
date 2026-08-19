@@ -49,21 +49,47 @@ func (r *Runtime) serveRequests(ctx context.Context) error {
 func (r *Runtime) answer(ctx context.Context, req *gamingpb.BridgeRequest) {
 	reply := &gamingpb.RespondRequest{RequestId: req.GetRequestId()}
 
-	if d := req.GetDeadlineUnix(); d > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithDeadline(ctx, time.Unix(d, 0))
-		defer cancel()
-	}
+	work, cancel := ctxFor(ctx, req)
+	defer cancel()
 
-	if err := r.doRequest(ctx, req, reply); err != nil {
+	if err := r.doRequest(work, req, reply); err != nil {
 		reply.Ok, reply.Error = false, err.Error()
 		r.log.Warnf("%s: %v", describe(req), err)
 	} else {
 		reply.Ok = true
 	}
-	if err := r.bridge.Respond(ctx, reply); err != nil {
+
+	// The answer gets its own budget, taken from the parent rather than
+	// from the work. A request that ran past the console's deadline is
+	// exactly the one whose answer is worth delivering, and sending it on
+	// the expired context would fail before it left.
+	say, done := context.WithTimeout(ctx, answerBudget)
+	defer done()
+	if err := r.bridge.Respond(say, reply); err != nil {
 		r.log.Warnf("could not answer %s: %v", describe(req), err)
 	}
+}
+
+// answerBudget is how long delivering an answer may take. Not retried: the
+// console polls state for anything that matters, and a retry loop against a
+// bridge that has gone away is this process stuck.
+const answerBudget = 30 * time.Second
+
+// ctxFor bounds a request by the deadline the console set, except for a
+// reclaim.
+//
+// A reclaim signs and broadcasts real coin. Abandoning one half way because
+// somebody closed a tab would leave money moving with nobody watching it, so it
+// runs to completion or fails on its own terms. The other four read state or
+// write down a preference, and none of them is worse for being cut short.
+func ctxFor(ctx context.Context, req *gamingpb.BridgeRequest) (context.Context, context.CancelFunc) {
+	if _, isReclaim := req.GetReq().(*gamingpb.BridgeRequest_Reclaim); isReclaim {
+		return ctx, func() {}
+	}
+	if d := req.GetDeadlineUnix(); d > 0 {
+		return context.WithDeadline(ctx, time.Unix(d, 0))
+	}
+	return ctx, func() {}
 }
 
 // doRequest is the five-case dispatch. Nothing here decides anything about
@@ -98,7 +124,11 @@ func (r *Runtime) doRequest(ctx context.Context, req *gamingpb.BridgeRequest, re
 		return nil
 
 	case *gamingpb.BridgeRequest_RefreshState:
-		reply.Result = &gamingpb.RespondRequest_State{State: r.gameState(ctx)}
+		st := r.gameState(ctx)
+		// Set only when the state answers a RefreshState, which is how
+		// the console tells this from an unsolicited report.
+		st.RequestId = req.GetRequestId()
+		reply.Result = &gamingpb.RespondRequest_State{State: st}
 		return nil
 	}
 	return fmt.Errorf("this game does not know how to answer that request")
