@@ -531,6 +531,11 @@ func (r *Runtime) sendPunishment(ctx context.Context, tx *wire.MsgTx, outpoint, 
 // The claim does not have to be discovered. Both seats hold both chains, so
 // the accused already knows the exact transaction each rung is - it signed
 // them - and only has to look on chain for whether one of them is there.
+//
+// Every rung is looked at rather than just the next one, and there is no need
+// to stop at the first: a rung that is not on chain is not a claim, so this
+// answers exactly what is standing and nothing else. Ordinarily that is one,
+// because an accuser runs them one at a time.
 func (r *Runtime) answerAnyClaim(ctx context.Context, t *table) {
 	mine, seated := t.form.OurSeat()
 	if !seated {
@@ -556,9 +561,5 @@ func (r *Runtime) answerAnyClaim(ctx context.Context, t *table) {
 		if err := r.AnswerAccusation(ctx, t.match, outpoint); err != nil {
 			r.log.Warnf("table %s: answering the claim at %s: %v", t.match, outpoint, err)
 		}
-		// One a block. The accuser runs one rung at a time, so there is
-		// never more than one standing, and answering the rest would be
-		// answering claims nobody has made.
-		return
 	}
 }

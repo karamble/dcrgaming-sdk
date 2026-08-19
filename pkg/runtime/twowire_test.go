@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -1263,4 +1264,135 @@ func TestAGameIsHandedItsLogKeyAndNotItsSessionKey(t *testing.T) {
 	if hex.EncodeToString(logs[mine]) != hex.EncodeToString(logKey.PubKey().SerializeCompressed()) {
 		t.Fatal("this seat's log key is not the one the table lists for it")
 	}
+}
+
+// A seat that answers every accusation keeps its bond, and the accuser is out
+// of pocket.
+//
+// This is what makes a false accusation worthless rather than dangerous. The
+// accuser spends a fee opening each rung and the accused spends one closing
+// it, so an accusation against somebody who is alive and answering costs both
+// of them a little and settles nothing - which is the point, because silence
+// is not proof and the remedy for it must not be a way of taking money from
+// people who are simply awake.
+//
+// Bounded, and the bound is the whole guarantee: the chain is only as deep as
+// the bond affords, so the worst a live seat can be made to spend is known
+// before it stakes anything.
+func TestASeatThatAnswersEveryAccusationKeepsItsBond(t *testing.T) {
+	fake := bridgetest.New(bridgetest.Options{
+		Game: "battleships", Network: "mainnet",
+		Params: chaincfg.TestNet3Params(), Height: 800,
+	})
+	srv, err := fake.Serve("seat0", "seat1")
+	if err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	one := wireSeat(t, ctx, srv, "seat0")
+	two := wireSeat(t, ctx, srv, "seat1")
+	go func() { _ = one.Run(ctx) }()
+	go func() { _ = two.Run(ctx) }()
+	waitFor(t, "both seats subscribed", func() bool { return fake.Subscribers() == 2 })
+
+	link := invite(t, nil)
+	sid, err := accept(one, link, testGCID)
+	if err != nil {
+		t.Fatalf("first seat accepting: %v", err)
+	}
+	if _, err := accept(two, link, testGCID); err != nil {
+		t.Fatalf("second seat accepting: %v", err)
+	}
+	block := func() {
+		fake.Mine(1)
+		one.Tick(ctx, fake.Height())
+		two.Tick(ctx, fake.Height())
+	}
+	waitFor(t, "both sides seated", func() bool {
+		block()
+		_, a := one.Seats(sid)
+		_, b := two.Seats(sid)
+		return a && b
+	})
+	for name, rt := range map[string]*Runtime{"one": one, "two": two} {
+		if err := rt.setPayout(ctx, payTo(t)); err != nil {
+			t.Fatalf("%s's payout: %v", name, err)
+		}
+		if err := rt.FundTableBond(ctx, sid); err != nil {
+			t.Fatalf("%s's table bond: %v", name, err)
+		}
+	}
+	waitFor(t, "both table bonds to be known on both sides", func() bool {
+		block()
+		return bothTableBondsKnown(one, sid) && bothTableBondsKnown(two, sid)
+	})
+	for name, rt := range map[string]*Runtime{"one": one, "two": two} {
+		if err := rt.PresignLadder(ctx, sid); err != nil {
+			t.Fatalf("%s presigning: %v", name, err)
+		}
+	}
+	depth := rungsAgainstOpponent(t, one, sid)
+	if depth < 2 {
+		t.Fatalf("the chain is %d rung deep, so answering every one proves little", depth)
+	}
+	t.Logf("the bond affords a chain %d rungs deep", depth)
+	waitFor(t, "the chain to be co-signed", func() bool {
+		block()
+		ready, _, ok := one.Ladder(sid)
+		return ok && ready == depth
+	})
+
+	// Accuse, over and over. The other side answers each one without being
+	// asked, which is the behaviour under test.
+	mine, _ := seatOfRuntime(one, sid)
+	accuse := func() error {
+		return one.Forfeit(ctx, ruling.Ruling{
+			Match: sid, Against: 1 - mine, Kind: ruling.Silence,
+			Silent: &ruling.Silent{Duty: "answer", Seq: 1, By: uint32(fake.Height())},
+		})
+	}
+	for run := 1; run <= depth; run++ {
+		if err := accuse(); err != nil {
+			t.Fatalf("accusation %d: %v", run, err)
+		}
+		if _, got, _ := one.Ladder(sid); got != run {
+			t.Fatalf("after accusation %d the chain reports %d run", run, got)
+		}
+		answered := len(fake.Broadcasts())
+		waitFor(t, fmt.Sprintf("accusation %d to be answered", run), func() bool {
+			block()
+			return len(fake.Broadcasts()) > answered
+		})
+	}
+
+	// And it is over: the chain the bond afforded is spent, and one more
+	// accusation has nothing left to run.
+	if err := accuse(); err == nil {
+		t.Fatal("the chain ran a rung it could not afford")
+	}
+	// The accused still holds its bond: nothing took it, because every
+	// claim came straight back.
+	if _, ok := two.ForfeitableBond(sid, 1-mine); !ok {
+		t.Error("the accused lost track of its own bond")
+	}
+}
+
+// bothTableBondsKnown reports whether a peer knows where every seat's table
+// bond is.
+func bothTableBondsKnown(rt *Runtime, sid string) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	t, ok := rt.tables[sid]
+	if !ok {
+		return false
+	}
+	for _, seat := range []uint32{0, 1} {
+		if t.tableBondFunded[seat].outpoint == "" {
+			return false
+		}
+	}
+	return true
 }
