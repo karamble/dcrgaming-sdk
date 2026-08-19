@@ -3,12 +3,13 @@
 **Epic**: [dcrgaming-runtime.prd.md](../../dcrgaming-runtime.prd.md) ·
 **Architecture**: [dcrgaming-runtime.architecture.md](../../dcrgaming-runtime.architecture.md)
 
-> **Status 2026-08-19.** T-01 to T-12 and T-15 are done. T-13 and T-14 are
-> partial and their decision notes say exactly how. Two tickets were added that
-> the original breakdown missed - **T-16 funding** and **T-18 settlement
-> co-signing** - both now done. One stage remains: forfeiture *execution*, which
-> needs a punishment-key exchange nobody scoped. See
-> `docs/decisions/` and the status table in `docs/building-a-game.md`.
+> **Status 2026-08-19.** All fifteen tickets are done, and the breakdown missed
+> five stages that were written as they surfaced: **T-16 funding**, **T-18
+> settlement co-signing**, **T-20 the punishment-key exchange and sweep**,
+> **T-21 the cooperative release**, and **T-22/23 the claim ladder with its
+> answer and take**. T-13 and T-14 remain partial by design and their decision
+> notes say exactly how. Nothing in the runtime returns ErrNotYet any more.
+> The gap that is left is a mainnet run, not code.
 
 ## Epic summary
 
