@@ -83,6 +83,18 @@ type table struct {
 	form  *membership.Formation
 	seats map[uint32][]byte
 	log   []Entry
+
+	// funded is where each seat's stake landed, filled in by the funding
+	// stage. payouts is where each seat asked to be paid, which every seat
+	// announces because it goes into the settlement they all sign.
+	funded  map[uint32]staked
+	payouts map[uint32][]byte
+}
+
+// staked is one seat's stake on the chain.
+type staked struct {
+	outpoint string
+	atoms    int64
 }
 
 // New builds a runtime. It does not start anything; call [Runtime.Run].

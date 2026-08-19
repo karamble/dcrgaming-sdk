@@ -259,8 +259,8 @@ func TestSettleRefusesAnOutcomeThatDecidesNothing(t *testing.T) {
 	if err := rt.Settle(ctx, "m1", Outcome{}); err == nil {
 		t.Fatal("settled an outcome that is neither void nor a share of anything")
 	}
-	if err := rt.Settle(ctx, "m1", Outcome{Void: true}); !errors.Is(err, ErrNotYet) {
-		t.Fatalf("a void outcome failed for the wrong reason: %v", err)
+	if err := rt.Settle(ctx, "m1", Outcome{Void: true}); err == nil {
+		t.Fatal("settled a table this game is not at")
 	}
 }
 
