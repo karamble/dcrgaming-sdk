@@ -98,6 +98,19 @@ func LogKeyFrom(priv *secp256k1.PrivateKey, match string) (*LogKey, error) {
 // Public is the key others verify against and build the forfeit key from.
 func (k *LogKey) Public() *secp256k1.PublicKey { return k.priv.PubKey() }
 
+// Priv is the key underneath, without the refusal to sign a position twice.
+//
+// Not a hole in anything. This wrapper stops an honest game equivocating by
+// accident - signing one position twice publishes the key, and doing it by
+// mistake is easy - but it was never what stops a dishonest one: a peer that
+// means to lie holds its own seed and can sign whatever it likes. What answers
+// that is the forfeiture machinery, which is why there is any.
+//
+// So this exists for the two callers that need the raw key and know why: a
+// misbehaviour harness proving the punishment works, and anything rebuilding a
+// key from a seed. Sign through the wrapper everywhere else.
+func (k *LogKey) Priv() *secp256k1.PrivateKey { return k.priv }
+
 // Match is the match this key belongs to.
 func (k *LogKey) Match() string { return k.match }
 
