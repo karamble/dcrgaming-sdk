@@ -43,6 +43,17 @@ func (r *Runtime) authorized(sid, _ string) bool {
 // Accepting is a person's decision, taken in the dashboard where the invitation
 // arrived; by the time this runs it has been made. What is left is deciding
 // whether the table it describes is one this game will sit at.
+// AcceptInvite joins the table an invitation names, in the group chat it
+// arrived in, and returns the session it joined.
+//
+// The bridge's own AcceptInvite request lands here too. It is exported because
+// accepting is a decision, and a game that takes that decision somewhere other
+// than the operator's console - a test, a bot, a lobby of its own - would
+// otherwise have no way to act on it.
+func (r *Runtime) AcceptInvite(ctx context.Context, link, gcid string) (string, error) {
+	return r.acceptInvite(ctx, &gamingpb.AcceptInvite{Invite: link, Gcid: gcid})
+}
+
 func (r *Runtime) acceptInvite(ctx context.Context, req *gamingpb.AcceptInvite) (string, error) {
 	gcid := strings.ToLower(strings.TrimSpace(req.GetGcid()))
 	if !gcID.MatchString(gcid) {

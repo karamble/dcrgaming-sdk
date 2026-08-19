@@ -374,17 +374,48 @@ func (r *Runtime) tickTable(ctx context.Context, t *table, height int64) {
 	r.repeatAnnouncements(ctx, t)
 }
 
+// repeatFormation says again what this peer holds, and asks for what it does
+// not, while a table is still forming.
+//
+// Both halves, because they heal different directions. A roster this peer
+// published once, when it learned its last join, is the only thing that can
+// teach a peer which never received that join - it cannot ask for what it does
+// not know exists, so the roster has to be volunteered. A commit is asked for
+// by name, so for that direction the ask is enough.
+//
+// Volunteering is safe to repeat: a roster carries every join with its
+// signature, adopting one is idempotent, and a peer taught nothing publishes
+// nothing back, so the repeat cannot echo.
+func (r *Runtime) repeatFormation(ctx context.Context, t *table) {
+	switch t.form.State() {
+	case membership.Joining:
+		if t.form.WindowClosed() {
+			return
+		}
+		// A join is dropped by any peer that has not accepted the
+		// invitation yet: it names a table they are not at. Two peers
+		// joining seconds apart each drop the other's, and if a join is
+		// published only once they both sit holding one until the
+		// deadline ends a table they both wanted.
+		//
+		// Asking is enough to heal that, and asking is what happens: an
+		// ask names the joins this peer holds, so the other side
+		// answers with the one that went missing. Saying our own join
+		// again as well would be a second message every block for a
+		// round of latency.
+		r.say(ctx, t, "what we are missing", r.publishResync)
+	case membership.Formed, membership.Committed:
+		r.say(ctx, t, "what we hold", r.publishRoster)
+		r.say(ctx, t, "what we are missing", r.publishResync)
+	}
+}
+
 // repeatAnnouncements says again what this seat has already said, while
 // anybody is still short of it.
 func (r *Runtime) repeatAnnouncements(ctx context.Context, t *table) {
 	seats, ok := t.form.Seats()
 	if !ok {
-		// Not seated yet, so what is still missing is agreement. A join
-		// or a roster that went astray leaves a table waiting for a
-		// message nobody will send again, and it sits out its deadline.
-		if err := r.publishRoster(ctx, t.match); err != nil {
-			r.log.Debugf("table %s: repeating what we hold: %v", t.match, err)
-		}
+		r.repeatFormation(ctx, t)
 		return
 	}
 	mine, ok := t.form.OurSeat()

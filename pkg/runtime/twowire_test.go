@@ -353,16 +353,8 @@ func TestAPeerThatMissedACommitAsksForIt(t *testing.T) {
 		t.Fatalf("the commit was not taken away: %d remain", commits(one, sid))
 	}
 
-	// Nobody will send it again on their own.
-	for range 3 {
-		fake.Mine(1)
-		one.Tick(ctx, fake.Height())
-		two.Tick(ctx, fake.Height())
-	}
-	if commits(one, sid) != 1 {
-		t.Fatal("the commit came back without asking, so this proves nothing about resync")
-	}
-
+	// Asked for directly, with no block in between: the per-block repair
+	// would fetch it too, and this is about the gap the bridge reports.
 	one.Resync(ctx)
 	waitFor(t, "the missing commit to come back", func() bool { return commits(one, sid) == 2 })
 
@@ -508,4 +500,63 @@ func TestAResyncAnswerCarriesOnlyTheDifference(t *testing.T) {
 		t.Error("the wrong commit was sent")
 	}
 	_ = ours
+}
+
+// A peer that missed a commit gets it back without anybody noticing a gap.
+//
+// The bridge reports the gaps it knows about, and that is not all of them: a
+// frame dropped for a table a peer had not joined yet, or lost anywhere the
+// bridge is not looking, is a message nobody will resend and nobody will ask
+// for. A table that is still forming therefore asks every block, rather than
+// waiting to be told it missed something.
+func TestATableStillFormingAsksEveryBlock(t *testing.T) {
+	fake := bridgetest.New(bridgetest.Options{
+		Game: "battleships", Network: "mainnet",
+		Params: chaincfg.TestNet3Params(), Height: 800,
+	})
+	srv, err := fake.Serve("seat0", "seat1")
+	if err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	one := wireSeat(t, ctx, srv, "seat0")
+	two := wireSeat(t, ctx, srv, "seat1")
+	go func() { _ = one.Run(ctx) }()
+	go func() { _ = two.Run(ctx) }()
+	waitFor(t, "both seats subscribed", func() bool { return fake.Subscribers() == 2 })
+
+	link := invite(t, nil)
+	sid, err := accept(one, link, testGCID)
+	if err != nil {
+		t.Fatalf("first seat accepting: %v", err)
+	}
+	if _, err := accept(two, link, testGCID); err != nil {
+		t.Fatalf("second seat accepting: %v", err)
+	}
+	waitFor(t, "both settled", func() bool {
+		fake.Mine(1)
+		one.Tick(ctx, fake.Height())
+		two.Tick(ctx, fake.Height())
+		return commits(one, sid) == 2 && commits(two, sid) == 2
+	})
+
+	// Lose it, and tell nobody. No gap is reported and no Resync is called.
+	tbl, err := one.tableOf(sid)
+	if err != nil {
+		t.Fatalf("table: %v", err)
+	}
+	forgetTheirCommit(t, one, tbl)
+	if commits(one, sid) != 1 {
+		t.Fatalf("the commit was not taken away: %d remain", commits(one, sid))
+	}
+
+	waitFor(t, "the block asking to bring it back", func() bool {
+		fake.Mine(1)
+		one.Tick(ctx, fake.Height())
+		two.Tick(ctx, fake.Height())
+		return commits(one, sid) == 2
+	})
 }
