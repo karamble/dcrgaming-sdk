@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/hex"
 	"testing"
 	"time"
 
@@ -9,8 +10,10 @@ import (
 
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/bridgetest"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/connect"
+	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/transport"
 	"github.com/karamble/dcrgaming-sdk/pkg/identity"
+	"github.com/karamble/dcrgaming-sdk/pkg/membership"
 	"github.com/karamble/dcrgaming-sdk/pkg/spend"
 )
 
@@ -61,8 +64,8 @@ func TestTwoRuntimesSeatEachOtherOverTheWire(t *testing.T) {
 			tbl := rt.tables[sid]
 			if tbl != nil {
 				seats, seated := tbl.form.Seats()
-				t.Logf("%s: state=%v joins=%d agreed=%v seats=%d/%v closed=%v",
-					name, tbl.form.State(), len(tbl.form.Joins()), tbl.form.Agreed(),
+				t.Logf("%s: state=%v joins=%d commits=%d agreed=%v seats=%d/%v closed=%v",
+					name, tbl.form.State(), len(tbl.form.Joins()), len(tbl.form.Commits()), tbl.form.Agreed(),
 					len(seats), seated, tbl.form.WindowClosed())
 			}
 			rt.mu.Unlock()
@@ -87,6 +90,23 @@ func TestTwoRuntimesSeatEachOtherOverTheWire(t *testing.T) {
 		_, b := two.Seats(sid)
 		return a && b
 	})
+
+	// Settled, which is every member bound to this membership - and with
+	// admission still open, so it happened on unanimity rather than by
+	// sitting out the deadline. A table that could only form the slow way
+	// is a lobby nobody watches.
+	for name, rt := range map[string]*Runtime{"one": one, "two": two} {
+		tbl, err := rt.tableOf(sid)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if tbl.form.State() != membership.Settled {
+			t.Fatalf("%s reached %v, not settled", name, tbl.form.State())
+		}
+		if got := len(tbl.form.Commits()); got != 2 {
+			t.Fatalf("%s holds %d of 2 commits", name, got)
+		}
+	}
 
 	// And they seated the same table.
 	first, _ := one.Seats(sid)
@@ -279,4 +299,213 @@ func TestATableWhoseOpeningMessagesWereLostStillForms(t *testing.T) {
 		two.Tick(ctx, fake.Height())
 		return agreed(one, sid) && agreed(two, sid)
 	})
+}
+
+// A peer that missed a commit gets it back by asking.
+//
+// Formation messages go out when something happens. A peer whose stream was
+// down while somebody committed is short a signature its table needs to
+// settle, and nothing on the sending side would ever send it again. Saying
+// what we hold does not fix it either - the gap is in what we never heard - so
+// it asks, naming what it has, and the table answers with the difference.
+func TestAPeerThatMissedACommitAsksForIt(t *testing.T) {
+	fake := bridgetest.New(bridgetest.Options{
+		Game: "battleships", Network: "mainnet",
+		Params: chaincfg.TestNet3Params(), Height: 800,
+	})
+	srv, err := fake.Serve("seat0", "seat1")
+	if err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	one := wireSeat(t, ctx, srv, "seat0")
+	two := wireSeat(t, ctx, srv, "seat1")
+	go func() { _ = one.Run(ctx) }()
+	go func() { _ = two.Run(ctx) }()
+	waitFor(t, "both seats subscribed", func() bool { return fake.Subscribers() == 2 })
+
+	link := invite(t, nil)
+	sid, err := accept(one, link, testGCID)
+	if err != nil {
+		t.Fatalf("first seat accepting: %v", err)
+	}
+	if _, err := accept(two, link, testGCID); err != nil {
+		t.Fatalf("second seat accepting: %v", err)
+	}
+	waitFor(t, "both settled", func() bool {
+		fake.Mine(1)
+		one.Tick(ctx, fake.Height())
+		two.Tick(ctx, fake.Height())
+		return commits(one, sid) == 2 && commits(two, sid) == 2
+	})
+
+	// Take one seat's copy of the other's commit away, the way a stream
+	// that was down would have left it: everything else intact.
+	tbl, err := one.tableOf(sid)
+	if err != nil {
+		t.Fatalf("table: %v", err)
+	}
+	theirs := forgetTheirCommit(t, one, tbl)
+	if commits(one, sid) != 1 {
+		t.Fatalf("the commit was not taken away: %d remain", commits(one, sid))
+	}
+
+	// Nobody will send it again on their own.
+	for range 3 {
+		fake.Mine(1)
+		one.Tick(ctx, fake.Height())
+		two.Tick(ctx, fake.Height())
+	}
+	if commits(one, sid) != 1 {
+		t.Fatal("the commit came back without asking, so this proves nothing about resync")
+	}
+
+	one.Resync(ctx)
+	waitFor(t, "the missing commit to come back", func() bool { return commits(one, sid) == 2 })
+
+	// The same commit, not some other one.
+	back, err := one.tableOf(sid)
+	if err != nil {
+		t.Fatalf("table: %v", err)
+	}
+	var found bool
+	for _, c := range back.form.Commits() {
+		if bytesEqual(c.Signer, theirs) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("a commit came back, but not the one that went missing")
+	}
+}
+
+func commits(rt *Runtime, sid string) int {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	t, ok := rt.tables[sid]
+	if !ok {
+		return 0
+	}
+	return len(t.form.Commits())
+}
+
+// forgetTheirCommit rebuilds a table's formation without the other seat's
+// commit, standing in for a stream that was down while it was published. It
+// returns the signer that was dropped.
+func forgetTheirCommit(t *testing.T, rt *Runtime, tbl *table) []byte {
+	t.Helper()
+	// Identified by its signer rather than its seat: seating needs the
+	// beacon, and this table has agreed without waiting for that block.
+	session, _, err := rt.seatKeys(tbl.form.Terms().SID)
+	if err != nil {
+		t.Fatalf("seat keys: %v", err)
+	}
+	ours := session.PubKey().SerializeCompressed()
+	var dropped []byte
+	for _, c := range tbl.form.Commits() {
+		if !bytesEqual(c.Signer, ours) {
+			dropped = c.Signer
+		}
+	}
+	if len(dropped) == 0 {
+		t.Fatal("this table holds no commit but its own, so there is nothing to lose")
+	}
+
+	creds, err := rt.seatCredentials(tbl.form.Terms())
+	if err != nil {
+		t.Fatalf("credentials: %v", err)
+	}
+	form, err := membership.NewFormation(tbl.form.Terms(), creds)
+	if err != nil {
+		t.Fatalf("formation: %v", err)
+	}
+	for _, j := range tbl.form.Joins() {
+		if err := form.AddJoin(j); err != nil {
+			t.Fatalf("join: %v", err)
+		}
+	}
+	if _, err := form.Bind(); err != nil {
+		t.Fatalf("bind: %v", err)
+	}
+	rt.mu.Lock()
+	tbl.form = form
+	rt.mu.Unlock()
+	return dropped
+}
+
+// A resync answer carries the difference and nothing else.
+//
+// Correctness does not depend on this - a peer that was sent the whole table
+// would adopt what it already had and be no worse off. Bandwidth does: a
+// resync happens on every reconnect, and an answer that repeated the whole
+// membership each time would be the largest message this protocol sends and
+// the one most often sent.
+func TestAResyncAnswerCarriesOnlyTheDifference(t *testing.T) {
+	fake, rt, _ := stand(t, &trivialGame{})
+	sid, them := seatTwo(t, fake, rt)
+	ctx := context.Background()
+	tbl, err := rt.tableOf(sid)
+	if err != nil {
+		t.Fatalf("table: %v", err)
+	}
+	// Two commits at this table, so there is something to leave out.
+	ours, err := tbl.form.Bind()
+	if err != nil {
+		t.Fatalf("our commit: %v", err)
+	}
+	theirs, err := them.form.Bind()
+	if err != nil {
+		t.Fatalf("their commit: %v", err)
+	}
+	if err := rt.addCommit(ctx, sid, theirs); err != nil {
+		t.Fatalf("their commit: %v", err)
+	}
+
+	// What this peer would actually ask, not a hand-built one: naming
+	// everything held is what keeps the answer small.
+	full := resyncAsk(tbl)
+	if len(full.Joins) != 2 || len(full.Commits) != 2 {
+		t.Fatalf("this table holds %d joins and %d commits, so this proves nothing",
+			len(full.Joins), len(full.Commits))
+	}
+
+	// An asker that holds everything is told nothing.
+	if got := resyncDiff(tbl, full); len(got.Joins) != 0 || len(got.Commits) != 0 {
+		t.Errorf("a peer that was already in step was sent %d joins and %d commits",
+			len(got.Joins), len(got.Commits))
+	}
+	// And nothing goes on the wire for it either.
+	before := len(fake.Sent())
+	if err := rt.answerResync(ctx, sid, full); err != nil {
+		t.Fatalf("answer: %v", err)
+	}
+	if grown := len(fake.Sent()) - before; grown != 0 {
+		t.Errorf("%d frames went out answering a peer with nothing to learn", grown)
+	}
+
+	// An asker short of one commit is told that one, not both.
+	short := schema.Resync{Joins: full.Joins}
+	for _, c := range tbl.form.Commits() {
+		if !bytesEqual(c.Signer, theirs.Signer) {
+			short.Commits = append(short.Commits, hex.EncodeToString(c.Signer))
+		}
+	}
+	got := resyncDiff(tbl, short)
+	if len(got.Joins) != 0 {
+		t.Errorf("%d joins were sent to a peer that named them all", len(got.Joins))
+	}
+	if len(got.Commits) != 1 {
+		t.Fatalf("a peer short of one commit was sent %d", len(got.Commits))
+	}
+	back, err := got.Commits[0].Into()
+	if err != nil {
+		t.Fatalf("the answer does not read back: %v", err)
+	}
+	if !bytesEqual(back.Signer, theirs.Signer) {
+		t.Error("the wrong commit was sent")
+	}
+	_ = ours
 }

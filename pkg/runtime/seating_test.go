@@ -164,10 +164,10 @@ func TestFormingATableIsWhatOpensItToTraffic(t *testing.T) {
 // silently making one.
 func TestFormationTrafficForAnUnknownTableIsRefused(t *testing.T) {
 	_, rt, _ := stand(t, &trivialGame{})
-	if err := rt.addJoin("no-such-table", nil); err == nil {
+	if err := rt.addJoin(context.Background(), "no-such-table", nil); err == nil {
 		t.Error("a join for an unknown table was taken")
 	}
-	if err := rt.addCommit("no-such-table", nil); err == nil {
+	if err := rt.addCommit(context.Background(), "no-such-table", nil); err == nil {
 		t.Error("a commit for an unknown table was taken")
 	}
 }

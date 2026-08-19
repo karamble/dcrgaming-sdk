@@ -492,7 +492,7 @@ func TestACommittedTableComesBackWithEverySeatsCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("their commit: %v", err)
 	}
-	if err := rt.addCommit(sid, theirs); err != nil {
+	if err := rt.addCommit(context.Background(), sid, theirs); err != nil {
 		t.Fatalf("taking their commit: %v", err)
 	}
 	if err := them.form.AddCommit(ours); err != nil {

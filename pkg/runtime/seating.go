@@ -210,7 +210,7 @@ func (r *Runtime) publishJoin(ctx context.Context, match string) error {
 	if join == nil {
 		return fmt.Errorf("this seat has no join to publish")
 	}
-	return r.send(ctx, t, schema.KindJoin, join)
+	return r.send(ctx, t, schema.KindJoin, schema.JoinFrom(join))
 }
 
 // send puts one message to a table's group chat.
@@ -224,14 +224,14 @@ func (r *Runtime) send(ctx context.Context, t *table, kind schema.Kind, body any
 func (t *table) gCID() string { return t.gcID }
 
 // addJoin takes another seat's claim to the table.
-func (r *Runtime) addJoin(match string, j *membership.Join) error {
-	r.mu.Lock()
-	t, ok := r.tables[match]
-	if !ok {
-		r.mu.Unlock()
+func (r *Runtime) addJoin(ctx context.Context, match string, j *membership.Join) error {
+	t, err := r.tableOf(match)
+	if err != nil {
 		return fmt.Errorf("a join arrived for a table this game is not at")
 	}
-	err := t.form.AddJoin(j)
+	from := at(t)
+	r.mu.Lock()
+	err = t.form.AddJoin(j)
 	r.mu.Unlock()
 	if err != nil {
 		return err
@@ -240,23 +240,25 @@ func (r *Runtime) addJoin(match string, j *membership.Join) error {
 	// down as soon as it is taken. Outside the lock, because writing it
 	// calls the game.
 	r.keep(t)
+	r.advance(ctx, t, from)
 	return nil
 }
 
 // addCommit takes another seat's commitment to the roster.
-func (r *Runtime) addCommit(match string, c *membership.Commit) error {
-	r.mu.Lock()
-	t, ok := r.tables[match]
-	if !ok {
-		r.mu.Unlock()
+func (r *Runtime) addCommit(ctx context.Context, match string, c *membership.Commit) error {
+	t, err := r.tableOf(match)
+	if err != nil {
 		return fmt.Errorf("a commit arrived for a table this game is not at")
 	}
-	err := t.form.AddCommit(c)
+	from := at(t)
+	r.mu.Lock()
+	err = t.form.AddCommit(c)
 	r.mu.Unlock()
 	if err != nil {
 		return err
 	}
 	r.keep(t)
+	r.advance(ctx, t, from)
 	return nil
 }
 
@@ -392,7 +394,8 @@ func (r *Runtime) adoptRoster(ctx context.Context, match string, body schema.Ros
 	if err != nil {
 		return err
 	}
-	held, agreed := len(t.form.Joins()), t.form.Agreed()
+	from := at(t)
+	agreed := t.form.Agreed()
 	if assertion != nil {
 		if err := t.form.AddAssertion(assertion, joins); err != nil {
 			return err
@@ -412,13 +415,234 @@ func (r *Runtime) adoptRoster(ctx context.Context, match string, body schema.Ros
 	// never said what it holds - without an answer here it never would, and
 	// the table would wait out its deadline one assertion short.
 	//
-	// Bounded by the same condition: a roster that changes nothing is not
-	// answered, so two peers that already agree fall silent instead of
-	// answering each other forever.
-	if len(t.form.Joins()) != held || t.form.Agreed() != agreed {
-		if err := r.publishRoster(ctx, match); err != nil {
-			r.log.Warnf("table %s: answering with what we hold: %v", match, err)
+	// Agreement counts as news even when the join set did not move, because
+	// it is the thing the other side is waiting to hear. A roster that
+	// changes neither is not answered, so two peers that already agree fall
+	// silent instead of answering each other forever.
+	if t.form.Agreed() != agreed {
+		r.say(ctx, t, "what we hold", r.publishRoster)
+	}
+	r.advance(ctx, t, from)
+	return nil
+}
+
+// KindResync asks the table for what this peer is missing, and KindResyncReply
+// answers. The runtime's own.
+const (
+	KindResync      = schema.KindResync
+	KindResyncReply = schema.KindResyncReply
+)
+
+// where is one table's position, taken before something is folded into it so
+// advance can tell what changed.
+type where struct {
+	state membership.State
+	joins int
+}
+
+func at(t *table) where {
+	return where{state: t.form.State(), joins: len(t.form.Joins())}
+}
+
+// advance moves a table on from wherever it was, and says what that means to
+// the rest of the table.
+//
+// Everything that folds something into a formation ends here, because the
+// formation itself never speaks: it takes joins, commits and assertions and
+// changes state, and somebody has to notice and answer. That somebody used to
+// be nobody, which is why no table could form.
+func (r *Runtime) advance(ctx context.Context, t *table, from where) {
+	learned := len(t.form.Joins()) > from.joins
+	moved := t.form.State() != from.state
+
+	switch t.form.State() {
+	case membership.Joining:
+		if learned {
+			// What heals a channel that loses messages: a peer that
+			// missed somebody's join learns it here, with the
+			// signature that lets it check it.
+			r.say(ctx, t, "what we hold", r.publishRoster)
+		}
+
+	case membership.Formed:
+		if learned || moved {
+			r.say(ctx, t, "what we hold", r.publishRoster)
+		}
+		// Bind when everyone says they hold this same membership, or
+		// when admission shuts, whichever comes first.
+		//
+		// The deadline is what makes "no more joins are coming" a fact,
+		// and alone it would do - but it would also mean every table
+		// takes as long as its window to form, which is a lobby nobody
+		// watches. Unanimity is the fast path: it does not prove no
+		// straggler exists, only the deadline does, but it does mean
+		// every member has seen exactly this set. What is left is a
+		// race that resolves to no game, never to two tables.
+		if t.form.Agreed() || t.form.WindowClosed() {
+			c, err := t.form.Bind()
+			if err != nil {
+				r.log.Errorf("table %s: binding: %v", t.match, err)
+				return
+			}
+			r.keep(t)
+			if err := r.send(ctx, t, schema.KindCommit, schema.CommitFrom(c)); err != nil {
+				r.log.Warnf("table %s: publishing our commit: %v", t.match, err)
+			}
+			// Binding may have finished the table on its own, if
+			// everybody else's commit arrived first.
+			r.advance(ctx, t, where{state: membership.Formed, joins: len(t.form.Joins())})
+		}
+
+	case membership.Committed:
+		if learned || moved {
+			r.say(ctx, t, "what we hold", r.publishRoster)
+		}
+
+	case membership.Settled:
+		if err := r.seatIfReady(ctx, t.match); err != nil {
+			r.log.Debugf("table %s: not seated yet: %v", t.match, err)
+		}
+
+	case membership.Aborted:
+		if moved {
+			r.log.Warnf("table %s did not form: %s", t.match, t.form.Reason())
+			r.keep(t)
 		}
 	}
-	return r.seatIfReady(ctx, match)
+}
+
+// say runs one of the publishing steps and logs rather than fails. Nothing
+// here is worth unwinding a formation over; the block repeat covers a message
+// that did not get out.
+func (r *Runtime) say(ctx context.Context, t *table, what string, f func(context.Context, string) error) {
+	if err := f(ctx, t.match); err != nil {
+		r.log.Warnf("table %s: saying %s: %v", t.match, what, err)
+	}
+}
+
+// Resync asks every live table for what this peer is missing.
+//
+// Called when the bridge says it dropped frames. Formation messages are
+// published when something happens, so a peer whose stream was down while
+// somebody committed is short a signature its table needs to settle, and
+// nothing would send it again. Saying what we hold is not enough on its own -
+// the gap may be in what we never heard - so this asks, naming what it has, and
+// the table answers with the difference.
+func (r *Runtime) Resync(ctx context.Context) {
+	r.mu.Lock()
+	tables := make([]*table, 0, len(r.tables))
+	for _, t := range r.tables {
+		tables = append(tables, t)
+	}
+	r.mu.Unlock()
+
+	for _, t := range tables {
+		if t.form.State() == membership.Aborted {
+			continue
+		}
+		r.say(ctx, t, "what we are missing", r.publishResync)
+	}
+}
+
+// publishResync asks the table for what this peer does not have, by naming
+// what it does.
+func (r *Runtime) publishResync(ctx context.Context, match string) error {
+	t, err := r.tableOf(match)
+	if err != nil {
+		return err
+	}
+	return r.send(ctx, t, KindResync, resyncAsk(t))
+}
+
+// resyncAsk names everything this peer holds.
+//
+// Naming it is the whole economy of the exchange: an ask that said only "catch
+// me up" would be answered with the entire membership, on every reconnect, by
+// every peer.
+func resyncAsk(t *table) schema.Resync {
+	ask := schema.Resync{}
+	for _, j := range t.form.Joins() {
+		ask.Joins = append(ask.Joins, hex.EncodeToString(j.Key))
+	}
+	for _, c := range t.form.Commits() {
+		ask.Commits = append(ask.Commits, hex.EncodeToString(c.Signer))
+	}
+	return ask
+}
+
+// answerResync sends back what the asker did not name.
+//
+// Only the difference, and nothing at all when there is none: an answer that
+// repeated the whole table every time somebody reconnected would be the
+// largest message this protocol sends, and the one most often sent.
+func (r *Runtime) answerResync(ctx context.Context, match string, ask schema.Resync) error {
+	t, err := r.tableOf(match)
+	if err != nil {
+		return err
+	}
+	reply := resyncDiff(t, ask)
+	if len(reply.Joins) == 0 && len(reply.Commits) == 0 {
+		return nil
+	}
+	return r.send(ctx, t, KindResyncReply, reply)
+}
+
+// resyncDiff is what the asker did not name.
+func resyncDiff(t *table, ask schema.Resync) schema.ResyncReply {
+	named := func(keys []string) map[string]struct{} {
+		out := make(map[string]struct{}, len(keys))
+		for _, k := range keys {
+			out[strings.ToLower(strings.TrimSpace(k))] = struct{}{}
+		}
+		return out
+	}
+	hasJoin, hasCommit := named(ask.Joins), named(ask.Commits)
+
+	var reply schema.ResyncReply
+	for _, j := range t.form.Joins() {
+		if _, ok := hasJoin[hex.EncodeToString(j.Key)]; !ok {
+			reply.Joins = append(reply.Joins, schema.JoinFrom(j))
+		}
+	}
+	for _, c := range t.form.Commits() {
+		if _, ok := hasCommit[hex.EncodeToString(c.Signer)]; !ok {
+			reply.Commits = append(reply.Commits, schema.CommitFrom(c))
+		}
+	}
+	return reply
+}
+
+// adoptResync folds in what somebody sent to catch this peer up.
+//
+// This trusts the sender for nothing. Everything here is signed by the member
+// it concerns and checked on the way in, so a peer answering with keys nobody
+// joined with, or a commit it forged, has them refused exactly as it would had
+// it published them directly.
+func (r *Runtime) adoptResync(ctx context.Context, match string, body schema.ResyncReply) error {
+	t, err := r.tableOf(match)
+	if err != nil {
+		return err
+	}
+	from := at(t)
+	for i, wj := range body.Joins {
+		j, err := wj.Into()
+		if err != nil {
+			return fmt.Errorf("resync join %d: %w", i, err)
+		}
+		if err := t.form.AddJoin(j); err != nil {
+			return fmt.Errorf("resync join %d: %w", i, err)
+		}
+	}
+	for i, wc := range body.Commits {
+		c, err := wc.Into()
+		if err != nil {
+			return fmt.Errorf("resync commit %d: %w", i, err)
+		}
+		if err := t.form.AddCommit(c); err != nil {
+			return fmt.Errorf("resync commit %d: %w", i, err)
+		}
+	}
+	r.keep(t)
+	r.advance(ctx, t, from)
+	return nil
 }

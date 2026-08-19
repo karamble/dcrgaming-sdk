@@ -261,7 +261,7 @@ func (r *Runtime) deliver(d transport.Delivery) {
 func (r *Runtime) ours(k schema.Kind) bool {
 	switch k {
 	case schema.KindJoin, schema.KindCommit, schema.KindSettle, KindPunishKey, KindRelease, KindAccusation,
-		KindFunded, KindBonded, KindPayout, KindRoster:
+		KindFunded, KindBonded, KindPayout, KindRoster, KindResync, KindResyncReply:
 		return true
 	}
 	return false
@@ -271,30 +271,26 @@ func (r *Runtime) ours(k schema.Kind) bool {
 func (r *Runtime) handleOurs(ctx context.Context, msg Message) error {
 	switch msg.Kind {
 	case schema.KindJoin:
-		var j membership.Join
-		if err := json.Unmarshal(msg.Body, &j); err != nil {
+		var body schema.Join
+		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return fmt.Errorf("read a join: %w", err)
 		}
-		if err := r.addJoin(msg.Match, &j); err != nil {
-			return err
+		j, err := body.Into()
+		if err != nil {
+			return fmt.Errorf("read a join: %w", err)
 		}
-		// Answered with what this peer now holds. A join arriving is the
-		// only signal that the set may have changed, and a table agrees
-		// when every peer has said the same thing about it.
-		if err := r.publishRoster(ctx, msg.Match); err != nil {
-			r.log.Warnf("table %s: saying what we hold: %v", msg.Match, err)
-		}
-		return r.seatIfReady(ctx, msg.Match)
+		return r.addJoin(ctx, msg.Match, j)
 
 	case schema.KindCommit:
-		var c membership.Commit
-		if err := json.Unmarshal(msg.Body, &c); err != nil {
+		var body schema.Commit
+		if err := json.Unmarshal(msg.Body, &body); err != nil {
 			return fmt.Errorf("read a commit: %w", err)
 		}
-		if err := r.addCommit(msg.Match, &c); err != nil {
-			return err
+		c, err := body.Into()
+		if err != nil {
+			return fmt.Errorf("read a commit: %w", err)
 		}
-		return r.seatIfReady(ctx, msg.Match)
+		return r.addCommit(ctx, msg.Match, c)
 
 	case schema.KindSettle:
 		var st schema.Settle
@@ -302,6 +298,20 @@ func (r *Runtime) handleOurs(ctx context.Context, msg Message) error {
 			return fmt.Errorf("read a payout: %w", err)
 		}
 		return r.adoptSettlement(ctx, msg.Match, st)
+
+	case KindResync:
+		var ask schema.Resync
+		if err := json.Unmarshal(msg.Body, &ask); err != nil {
+			return fmt.Errorf("read a resync: %w", err)
+		}
+		return r.answerResync(ctx, msg.Match, ask)
+
+	case KindResyncReply:
+		var reply schema.ResyncReply
+		if err := json.Unmarshal(msg.Body, &reply); err != nil {
+			return fmt.Errorf("read a resync answer: %w", err)
+		}
+		return r.adoptResync(ctx, msg.Match, reply)
 
 	case KindRoster:
 		var ros schema.Roster
@@ -362,6 +372,20 @@ func (r *Runtime) handleOurs(ctx context.Context, msg Message) error {
 // that is not simply the context ending.
 func (r *Runtime) Run(ctx context.Context) error {
 	r.runCtx = ctx
+
+	// The bridge says when it dropped frames, and a dropped formation
+	// message is one nobody will send again. Registered before the stream
+	// opens, because the first thing a reconnecting bridge reports is the
+	// gap it just had.
+	r.bridge.SetOnGap(func(gcids []string) {
+		if len(gcids) > 0 {
+			r.log.Warnf("the bridge missed frames for %d table(s); asking for what we are short of", len(gcids))
+		} else {
+			r.log.Warnf("the bridge missed frames and could not say which tables; asking for what we are short of")
+		}
+		r.Resync(ctx)
+	})
+
 	frames, err := r.bridge.Events(ctx)
 	if err != nil {
 		return fmt.Errorf("subscribe to the bridge: %w", err)
