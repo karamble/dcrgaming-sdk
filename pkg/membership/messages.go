@@ -36,6 +36,8 @@ var (
 	// dealing against money that is not there.
 	bondedTag = []byte("gaming/table/bonded/v1")
 	payoutTag = []byte("gaming/table/payout/v1")
+	// bondTermsTag is additive: a new hash input, never a change to a frozen one.
+	bondTermsTag = []byte("gaming/table/bond-terms/v1")
 )
 
 // Terms are what an invitation states and every join commits to.
@@ -63,6 +65,20 @@ type Terms struct {
 	// disagree, and a deadline each machine reads differently is one that
 	// decides membership by whose clock ran fast.
 	Until uint32
+
+	// BondAtoms and BondLockBlocks are the table's bond terms: what each
+	// seat posts, and the relative lock it sits behind.
+	//
+	// They are here for the reason CSVBlocks is: every seat builds its own
+	// bond, so every seat has to be able to check everyone else's, and terms
+	// nobody agreed are terms nobody can check. Games differ on the values -
+	// battleships locks bonds for 4032 blocks where the escrow floor is 2016
+	// - so the floors live in escrow and the choice lives here.
+	//
+	// Both zero means the table has no bonds, which is a table poker formed
+	// for years. See Hash for why that case must stay byte-identical.
+	BondAtoms      uint64
+	BondLockBlocks uint32
 }
 
 // Validate reports whether the terms could describe a table at all.
@@ -98,10 +114,28 @@ func (t Terms) Validate() error {
 		// formed by guessing.
 		return fmt.Errorf("terms state no admission deadline")
 	}
+	if t.bonded() {
+		// Stating one term and not the other is caught by the floors
+		// below: the missing half is zero, and zero is under both.
+		if t.BondAtoms < escrow.MinBondAtoms {
+			return fmt.Errorf("a bond of %d atoms is under the escrow floor of %d",
+				t.BondAtoms, escrow.MinBondAtoms)
+		}
+		if t.BondLockBlocks < escrow.MinBondBlocks {
+			return fmt.Errorf("a bond lock of %d blocks is under the escrow floor of %d",
+				t.BondLockBlocks, escrow.MinBondBlocks)
+		}
+	}
 	return nil
 }
 
 // Hash is the digest joins and commits bind to.
+//
+// Bond terms are appended only when the table has them, and behind their own
+// tag. That is not tidiness: dcrpoker's live tables carry joins and commits
+// signed over this digest, and a table without bond terms has to keep hashing
+// exactly the bytes it did before they existed or every one of those signatures
+// stops verifying. A table with bond terms is a table nobody has signed yet.
 func (t Terms) Hash() ([32]byte, error) {
 	if err := t.Validate(); err != nil {
 		return [32]byte{}, err
@@ -115,8 +149,16 @@ func (t Terms) Hash() ([32]byte, error) {
 	_ = binary.Write(&b, binary.BigEndian, t.Seats)
 	_ = binary.Write(&b, binary.BigEndian, t.CSVBlocks)
 	_ = binary.Write(&b, binary.BigEndian, t.Until)
+	if t.bonded() {
+		b.Write(bondTermsTag)
+		_ = binary.Write(&b, binary.BigEndian, t.BondAtoms)
+		_ = binary.Write(&b, binary.BigEndian, t.BondLockBlocks)
+	}
 	return blake256.Sum256(b.Bytes()), nil
 }
+
+// bonded reports whether the table states bond terms at all.
+func (t Terms) bonded() bool { return t.BondAtoms != 0 || t.BondLockBlocks != 0 }
 
 // Join is one player's claim to a seat, signed by the key it announces.
 //
