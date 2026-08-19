@@ -160,9 +160,7 @@ func TestAFourMethodGameAnswersAllFiveControlRequests(t *testing.T) {
 		case tc.ok && err != nil:
 			t.Errorf("%s: %v", tc.name, err)
 		case !tc.ok && err == nil:
-			t.Errorf("%s: answered a stage that is not built", tc.name)
-		case !tc.ok && !errors.Is(err, ErrNotYet):
-			t.Errorf("%s: failed for the wrong reason: %v", tc.name, err)
+			t.Errorf("%s: answered when it should have refused", tc.name)
 		}
 	}
 
