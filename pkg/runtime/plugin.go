@@ -170,14 +170,6 @@ func (r *Runtime) gameState(ctx context.Context) (st *gamingpb.GameState) {
 	return st
 }
 
-// doReclaim pulls locked money home. Reclaim is T-10.
-func (r *Runtime) doReclaim(_ context.Context, req *gamingpb.Reclaim) (string, error) {
-	if strings.TrimSpace(req.GetDestAddr()) == "" {
-		return "", fmt.Errorf("a reclaim must say where to pay")
-	}
-	return "", fmt.Errorf("reclaiming: %w", ErrNotYet)
-}
-
 // Settle declares who won. Settlement is T-11.
 func (r *Runtime) Settle(_ context.Context, match string, out Outcome) error {
 	if match == "" {

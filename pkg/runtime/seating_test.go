@@ -250,7 +250,7 @@ func TestASeatWithNoBondCannotJoin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("identity: %v", err)
 	}
-	rt, err := New(Config{Rules: g, Bridge: conn, Book: book, Identity: seed, SeatTags: testTags})
+	rt, err := New(Config{Rules: g, Bridge: conn, Book: book, Identity: seed, SeatTags: testTags, Params: chaincfg.TestNet3Params()})
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
