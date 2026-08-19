@@ -153,7 +153,11 @@ type table struct {
 	forfeitFunded   map[uint32]staked
 	tableBondFunded map[uint32]staked
 	release         *release
-	ladder          *ladder
+	// ladders are the accusation chains this table has built, by the seat
+	// each one accuses. Both of them: the one against the opponent is the
+	// one this peer may run, and the one against itself is the one it must
+	// co-sign so the opponent can run that.
+	ladders map[uint32]*ladder
 
 	// seatBond is the bond this seat's join binds to, for a game that posts
 	// one per table. Empty for a game that posts one per identity, where

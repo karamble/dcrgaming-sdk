@@ -87,6 +87,16 @@ type Terms struct {
 	// also fixes the attrition bound, which is what a player is told before
 	// they bond.
 	AccuseFeeAtoms uint64
+
+	// ForfeitBondAtoms is what a seat stakes against telling the truth,
+	// where that differs from the table bond.
+	//
+	// Zero means it is the same as BondAtoms, which is what dcrpoker has.
+	// dcrbattleships scales it to the buy-in instead - a proven lie should
+	// cost at least what was on the table, or lying is worth it - and that
+	// is an economic choice a game makes, so it is agreed here rather than
+	// read from each build.
+	ForfeitBondAtoms uint64
 }
 
 // Validate reports whether the terms could describe a table at all.
@@ -165,13 +175,15 @@ func (t Terms) Hash() ([32]byte, error) {
 		_ = binary.Write(&b, binary.BigEndian, t.BondAtoms)
 		_ = binary.Write(&b, binary.BigEndian, t.BondLockBlocks)
 		_ = binary.Write(&b, binary.BigEndian, t.AccuseFeeAtoms)
+		_ = binary.Write(&b, binary.BigEndian, t.ForfeitBondAtoms)
 	}
 	return blake256.Sum256(b.Bytes()), nil
 }
 
 // bonded reports whether the table states bond terms at all.
 func (t Terms) bonded() bool {
-	return t.BondAtoms != 0 || t.BondLockBlocks != 0 || t.AccuseFeeAtoms != 0
+	return t.BondAtoms != 0 || t.BondLockBlocks != 0 || t.AccuseFeeAtoms != 0 ||
+		t.ForfeitBondAtoms != 0
 }
 
 // Join is one player's claim to a seat, signed by the key it announces.

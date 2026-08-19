@@ -56,7 +56,7 @@ func (r *Runtime) FundTableBond(ctx context.Context, match string) error {
 	t.tableBondFunded[mine] = out
 	r.mu.Unlock()
 	r.keep(t)
-	if err := r.announceBonded(ctx, match); err != nil {
+	if err := r.announceBonded(ctx, match, tableBond); err != nil {
 		r.log.Warnf("table %s: saying where the bond is: %v", match, err)
 	}
 	return nil

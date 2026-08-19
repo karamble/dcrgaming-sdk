@@ -560,3 +560,194 @@ func TestATableStillFormingAsksEveryBlock(t *testing.T) {
 		return commits(one, sid) == 2
 	})
 }
+
+// Two peers build each other's accusation chains, over the wire.
+//
+// This is the forfeiture path's foundation and the part no single-peer test
+// can reach: a chain is built over the opponent's forfeitable bond, and every
+// rung needs the opponent's signature - including the accused's, gathered
+// while everybody is still cooperating, because it cannot be gathered when it
+// is needed.
+//
+// It also needs each side to know where the other's bond is, which is not on
+// the chain in any findable way: only the payer saw it land, so it is
+// announced. A runtime that could not read that announcement would sit with a
+// chain it could never build and a cheat it could never punish.
+func TestTwoRuntimesBuildEachOthersLadders(t *testing.T) {
+	fake := bridgetest.New(bridgetest.Options{
+		Game: "battleships", Network: "mainnet",
+		Params: chaincfg.TestNet3Params(), Height: 800,
+	})
+	srv, err := fake.Serve("seat0", "seat1")
+	if err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	one := wireSeat(t, ctx, srv, "seat0")
+	two := wireSeat(t, ctx, srv, "seat1")
+	go func() { _ = one.Run(ctx) }()
+	go func() { _ = two.Run(ctx) }()
+	waitFor(t, "both seats subscribed", func() bool { return fake.Subscribers() == 2 })
+
+	link := invite(t, nil)
+	sid, err := accept(one, link, testGCID)
+	if err != nil {
+		t.Fatalf("first seat accepting: %v", err)
+	}
+	if _, err := accept(two, link, testGCID); err != nil {
+		t.Fatalf("second seat accepting: %v", err)
+	}
+	block := func() {
+		fake.Mine(1)
+		one.Tick(ctx, fake.Height())
+		two.Tick(ctx, fake.Height())
+	}
+	waitFor(t, "both sides seated", func() bool {
+		block()
+		_, a := one.Seats(sid)
+		_, b := two.Seats(sid)
+		return a && b
+	})
+
+	// Both forfeitable bonds exist only once both seats have announced the
+	// key that can take them. The announcement goes out at seating, when
+	// the other side may not be seated yet to hear it, so what gets it
+	// there is the repeat on the next block.
+	waitFor(t, "both sides to derive both forfeitable bonds", func() bool {
+		block()
+		for _, rt := range []*Runtime{one, two} {
+			for _, seat := range []uint32{0, 1} {
+				if _, ok := rt.ForfeitableBond(sid, seat); !ok {
+					return false
+				}
+			}
+		}
+		return true
+	})
+
+	// Both bonds, because they answer different faults: the chain built
+	// below spends the table bond, which is what a seat stakes against
+	// going quiet, and the forfeitable bond is taken whole for a proven
+	// lie. Each seat pays its own and tells the other where they are.
+	for name, rt := range map[string]*Runtime{"one": one, "two": two} {
+		if err := rt.FundTableBond(ctx, sid); err != nil {
+			t.Fatalf("%s's table bond: %v", name, err)
+		}
+		if err := rt.FundForfeitBond(ctx, sid); err != nil {
+			t.Fatalf("%s's forfeitable bond: %v", name, err)
+		}
+	}
+	waitFor(t, "each side to learn where the other's bonds are", func() bool {
+		block()
+		return bothBondsKnown(one, sid) && bothBondsKnown(two, sid)
+	})
+
+	// Now each can build the chain that punishes the other, and each needs
+	// the other's signature on it.
+	if err := one.PresignLadder(ctx, sid); err != nil {
+		t.Fatalf("first seat presigning: %v", err)
+	}
+	if err := two.PresignLadder(ctx, sid); err != nil {
+		t.Fatalf("second seat presigning: %v", err)
+	}
+	// Every rung, not merely some: a chain is run one rung at a time and a
+	// rung short of a signature is a rung the attrition stops at.
+	want := rungsAgainstOpponent(t, one, sid)
+	if want == 0 {
+		t.Fatal("the chain has no rungs, so this proves nothing")
+	}
+	waitFor(t, "every rung of both chains to be co-signed", func() bool {
+		block()
+		a, _, aok := one.Ladder(sid)
+		b, _, bok := two.Ladder(sid)
+		return aok && bok && a == want && b == want
+	})
+
+	a, aRun, _ := one.Ladder(sid)
+	b, bRun, _ := two.Ladder(sid)
+	if a != b || a != want {
+		t.Fatalf("the two sides hold %d and %d co-signed rungs of %d", a, b, want)
+	}
+	if aRun != 0 || bRun != 0 {
+		t.Fatalf("a rung has been run before anybody was accused: %d and %d", aRun, bRun)
+	}
+
+	// And the asymmetric case, which is the one that hangs: a peer that is
+	// short of a signature while the other has everything. The one with
+	// everything has nothing of its own left to say, so unless a repeat is
+	// answered it never speaks again and the short one waits forever.
+	forgetTheirRungSignature(t, two, sid)
+	if got, _, _ := two.Ladder(sid); got == want {
+		t.Fatal("the signature was not taken away, so this proves nothing")
+	}
+	if got, _, _ := one.Ladder(sid); got != want {
+		t.Fatalf("the other side is short too (%d of %d), so this tests the wrong thing", got, want)
+	}
+	waitFor(t, "the missing rung signature to come back", func() bool {
+		block()
+		got, _, _ := two.Ladder(sid)
+		return got == want
+	})
+}
+
+// forgetTheirRungSignature drops one seat's copy of the opponent's signature on
+// the first rung, the way a message that never arrived would have left it.
+func forgetTheirRungSignature(t *testing.T, rt *Runtime, sid string) {
+	t.Helper()
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	tbl := rt.tables[sid]
+	mine, _ := tbl.form.OurSeat()
+	seats, _ := tbl.form.Seats()
+	l := tbl.ladders[1-mine]
+	if l == nil || len(l.rungs) == 0 {
+		t.Fatal("no chain to forget anything from")
+	}
+	mineHex := hex.EncodeToString(seats[mine])
+	for signer := range l.sigs[0] {
+		if signer != mineHex {
+			delete(l.sigs[0], signer)
+		}
+	}
+	l.ready[0] = nil
+}
+
+// rungsAgainstOpponent is how many rungs the chain this peer could run has.
+func rungsAgainstOpponent(t *testing.T, rt *Runtime, sid string) int {
+	t.Helper()
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	tbl, ok := rt.tables[sid]
+	if !ok {
+		return 0
+	}
+	mine, seated := tbl.form.OurSeat()
+	if !seated {
+		return 0
+	}
+	l := tbl.ladders[1-mine]
+	if l == nil {
+		return 0
+	}
+	return len(l.rungs)
+}
+
+// bothBondsKnown reports whether a peer knows where every seat's forfeitable
+// bond is.
+func bothBondsKnown(rt *Runtime, sid string) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	t, ok := rt.tables[sid]
+	if !ok {
+		return false
+	}
+	for _, seat := range []uint32{0, 1} {
+		if t.forfeitFunded[seat].outpoint == "" || t.tableBondFunded[seat].outpoint == "" {
+			return false
+		}
+	}
+	return true
+}

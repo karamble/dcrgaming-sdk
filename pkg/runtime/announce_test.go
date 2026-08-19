@@ -253,6 +253,11 @@ func TestTheStakeIsSaidAgainUntilTheTableIsFunded(t *testing.T) {
 	sid, them := seatTwo(t, fake, rt)
 	ctx := context.Background()
 
+	// The opponent's punishment key too, or the repeat that carries ours
+	// keeps a message going out every block and this counts that instead.
+	if err := rt.adoptPunishKey(ctx, sid, theirPunishNote(t, rt, sid, them)); err != nil {
+		t.Fatalf("adopt their punishment key: %v", err)
+	}
 	// This seat's stake is on the chain; the other's is not yet known.
 	tbl, _ := rt.tableOf(sid)
 	mine, _ := tbl.form.OurSeat()
@@ -539,7 +544,7 @@ func TestASeatCannotMoveItsTableBondOnceAnnounced(t *testing.T) {
 	if err == nil {
 		t.Fatal("a seat moved its table bond after announcing it")
 	}
-	if !strings.Contains(err.Error(), "already bonded at") {
+	if !strings.Contains(err.Error(), "already put its table bond at") {
 		t.Fatalf("refused for the wrong reason: %v", err)
 	}
 	rt.mu.Lock()

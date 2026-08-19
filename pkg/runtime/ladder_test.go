@@ -62,10 +62,17 @@ func TestTheChainIsPresignedAtBonding(t *testing.T) {
 	}
 	tbl := tableOf(t, rt, sid)
 	rt.mu.Lock()
-	l := tbl.ladder
+	mine := ourSeatOfLocked(tbl)
+	l := tbl.ladders[1-mine]
+	against := tbl.ladders[mine]
 	rt.mu.Unlock()
 	if l == nil || len(l.rungs) == 0 {
-		t.Fatal("no chain was built")
+		t.Fatal("no chain was built against the opponent")
+	}
+	// And the one that can be run against this seat, which it has to sign
+	// for the opponent to be able to run it at all.
+	if against == nil || len(against.rungs) == 0 {
+		t.Fatal("no chain was built against this seat, so the opponent could never run one")
 	}
 	ready, run, ok := rt.Ladder(sid)
 	if !ok {
@@ -112,7 +119,7 @@ func TestAnAccusationFromAStrangerIsRefused(t *testing.T) {
 	// A real rung, so only the signer check can refuse it.
 	tbl := tableOf(t, rt, sid)
 	rt.mu.Lock()
-	raw, err := tbl.ladder.rungs[0].Bytes()
+	raw, err := tbl.ladders[1-ourSeatOfLocked(tbl)].rungs[0].Bytes()
 	rt.mu.Unlock()
 	if err != nil {
 		t.Fatalf("serialise: %v", err)
@@ -149,9 +156,13 @@ func TestNoRungRunsBeforeItIsCoSigned(t *testing.T) {
 	}
 }
 
-// A silence ruling against a seat the chain was not built against is refused,
-// so a chain cannot be pointed at the wrong bond.
-func TestAChainCannotBePointedAtAnotherSeat(t *testing.T) {
+// A seat cannot run the chain built against itself.
+//
+// Both chains are held: the one against the opponent, which this seat may run,
+// and the one against this seat, which exists so the opponent can run it.
+// Running the second here would spend our own bond into a claim the opponent
+// answers and keeps.
+func TestASeatCannotRunTheChainAgainstItself(t *testing.T) {
 	fake, rt, _ := stand(t, &trivialGame{})
 	sid, _ := bondedTwo(t, rt, fake)
 	if err := rt.PresignLadder(context.Background(), sid); err != nil {
@@ -165,7 +176,7 @@ func TestAChainCannotBePointedAtAnotherSeat(t *testing.T) {
 	if err == nil {
 		t.Fatal("ran a chain against the wrong seat")
 	}
-	if !strings.Contains(err.Error(), "is against seat") {
+	if !strings.Contains(err.Error(), "not ours to run") {
 		t.Fatalf("refused for the wrong reason: %v", err)
 	}
 }
@@ -283,7 +294,8 @@ func TestASeatCannotTakeAClaimAgainstItself(t *testing.T) {
 	}
 	tbl := tableOf(t, rt, sid)
 	rt.mu.Lock()
-	tbl.ladder.against = ourSeatOfLocked(tbl)
+	mine := ourSeatOfLocked(tbl)
+	tbl.ladders[1-mine].against = mine
 	rt.mu.Unlock()
 	err := rt.TakeExpiredClaim(context.Background(), sid, strings.Repeat("f5", 32)+":0")
 	if err == nil || !strings.Contains(err.Error(), "against itself") {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/txscript/v4/stdaddr"
 	"github.com/decred/dcrd/wire"
 
@@ -57,7 +58,33 @@ func (r *Runtime) PresignLadder(ctx context.Context, match string) error {
 	if len(seats) != 2 {
 		return fmt.Errorf("an accusation chain is heads-up, and this table seats %d", len(seats))
 	}
-	against := uint32(1 - mine)
+	session, _, err := r.seatKeys(t.form.Terms().SID)
+	if err != nil {
+		return err
+	}
+	mineHex := hex.EncodeToString(seats[mine])
+
+	// Both chains, and that is the whole of why this works: a rung needs
+	// every member's signature including the accused's, so each seat has to
+	// sign the chain that can be run against itself. The two sides build
+	// the same bytes for a given target - the draft comes from that seat's
+	// bond, its outpoint, the agreed fee and the chain - so signatures can
+	// be exchanged by matching the transaction rather than by trusting an
+	// index or a description of it.
+	//
+	// Building only the chain against the opponent leaves each side holding
+	// transactions the other has never seen, and no rung is ever co-signed.
+	for _, against := range []uint32{mine, 1 - mine} {
+		if err := r.presignAgainst(ctx, t, against, mineHex, session); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// presignAgainst builds, signs and announces the chain against one seat.
+func (r *Runtime) presignAgainst(ctx context.Context, t *table, against uint32,
+	mineHex string, session *secp256k1.PrivateKey) error {
 
 	draft, err := r.accuseDraft(t, against)
 	if err != nil {
@@ -65,26 +92,18 @@ func (r *Runtime) PresignLadder(ctx context.Context, match string) error {
 	}
 	rungs, err := punish.BuildLadder(draft)
 	if err != nil {
-		return fmt.Errorf("build the accusation chain: %w", err)
-	}
-	session, _, err := r.seatKeys(t.form.Terms().SID)
-	if err != nil {
-		return err
+		return fmt.Errorf("build the accusation chain against seat %d: %w", against, err)
 	}
 
 	l := &ladder{against: against, bond: draft.Bond, rungs: rungs}
 	l.sigs = make([]map[string][]byte, len(rungs))
 	l.ready = make([]*wire.MsgTx, len(rungs))
-	mineHex := hex.EncodeToString(seats[mine])
-	type announce struct {
-		raw string
-		sig string
-	}
+	type announce struct{ raw, sig string }
 	out := make([]announce, 0, len(rungs))
 	for i, tx := range rungs {
 		sig, err := escrow.SignBondSpend(tx, draft.Bond, session)
 		if err != nil {
-			return fmt.Errorf("sign rung %d: %w", i, err)
+			return fmt.Errorf("sign rung %d against seat %d: %w", i, against, err)
 		}
 		l.sigs[i] = map[string][]byte{mineHex: sig}
 		raw, err := tx.Bytes()
@@ -95,7 +114,16 @@ func (r *Runtime) PresignLadder(ctx context.Context, match string) error {
 	}
 
 	r.mu.Lock()
-	t.ladder = l
+	if t.ladders == nil {
+		t.ladders = map[uint32]*ladder{}
+	}
+	if held, seen := t.ladders[against]; seen {
+		// Already built. Keep the signatures already gathered rather
+		// than starting the exchange again with an empty set.
+		l = held
+	} else {
+		t.ladders[against] = l
+	}
 	r.mu.Unlock()
 
 	// One message per rung, each carrying the transaction it signs, so the
@@ -105,7 +133,7 @@ func (r *Runtime) PresignLadder(ctx context.Context, match string) error {
 		if err := r.send(ctx, t, KindAccusation, schema.Accusation{
 			Seat: against, Tx: a.raw, Signer: mineHex, Sig: a.sig,
 		}); err != nil {
-			return fmt.Errorf("announce rung %d: %w", i, err)
+			return fmt.Errorf("announce rung %d against seat %d: %w", i, against, err)
 		}
 	}
 	return nil
@@ -166,7 +194,7 @@ func feeFor(stated, game uint64) int64 {
 // A seat that could get the other to sign a rung it had not computed could
 // pre-sign a chain draining the bond somewhere else, and would only need it
 // signed once.
-func (r *Runtime) adoptAccusation(_ context.Context, match string, body schema.Accusation) error {
+func (r *Runtime) adoptAccusation(ctx context.Context, match string, body schema.Accusation) error {
 	r.mu.Lock()
 	t, ok := r.tables[match]
 	r.mu.Unlock()
@@ -182,20 +210,23 @@ func (r *Runtime) adoptAccusation(_ context.Context, match string, body schema.A
 		return fmt.Errorf("an accusation chain was signed by somebody who is not at this table")
 	}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	l := t.ladder
-	if l == nil {
-		return fmt.Errorf("no accusation chain has been built at this table yet")
-	}
 	sig, err := hex.DecodeString(body.Sig)
 	if err != nil || len(sig) == 0 {
 		return fmt.Errorf("that rung's signature is not usable")
+	}
+
+	r.mu.Lock()
+	l := t.ladders[body.Seat]
+	if l == nil {
+		r.mu.Unlock()
+		return fmt.Errorf("no accusation chain against seat %d has been built at this table yet",
+			body.Seat)
 	}
 	at := -1
 	for i, tx := range l.rungs {
 		raw, err := tx.Bytes()
 		if err != nil {
+			r.mu.Unlock()
 			return err
 		}
 		if hex.EncodeToString(raw) == body.Tx {
@@ -204,10 +235,36 @@ func (r *Runtime) adoptAccusation(_ context.Context, match string, body schema.A
 		}
 	}
 	if at < 0 {
+		r.mu.Unlock()
 		return fmt.Errorf("that is not a rung of the chain this peer built, and it was not signed")
 	}
+	// Already finished here, which means the other side is still short of
+	// our signature: nobody repeats a rung they have completed. Answering
+	// one cannot echo, because the answer completes them and they stop -
+	// and it is the only acknowledgement this exchange has. Without it the
+	// peer that finishes first falls silent, and the peer that missed its
+	// first send waits for a message that will never come again.
+	wasReady := l.ready[at] != nil
 	l.sigs[at][body.Signer] = sig
-	return l.finish(l.bond, r.params)
+	if err := l.finish(l.bond, r.params); err != nil {
+		r.mu.Unlock()
+		return err
+	}
+	mine, seated := t.form.OurSeat()
+	var answer []byte
+	if wasReady && seated {
+		answer = l.sigs[at][hex.EncodeToString(seats[mine])]
+	}
+	against := l.against
+	r.mu.Unlock()
+
+	if len(answer) == 0 {
+		return nil
+	}
+	return r.send(ctx, t, KindAccusation, schema.Accusation{
+		Seat: against, Tx: body.Tx, Signer: hex.EncodeToString(seats[mine]),
+		Sig: hex.EncodeToString(answer),
+	})
 }
 
 // finish co-signs every rung both seats have signed. Caller holds the lock.
@@ -247,17 +304,22 @@ func (l *ladder) finish(bond []byte, params stdaddr.AddressParams) error {
 // claimed bond straight back and the chain moves on. Running them all at once
 // would spend the bond into a chain nobody can answer.
 func (r *Runtime) runLadder(ctx context.Context, match string, against uint32) error {
-	r.mu.Lock()
-	t, ok := r.tables[match]
-	r.mu.Unlock()
-	if !ok {
-		return fmt.Errorf("no table %q", match)
+	t, mine, err := r.ourSeatAt(match)
+	if err != nil {
+		return err
+	}
+	// Both chains are held here, and only one of them is this seat's to
+	// run. The other exists so the opponent can run it at this seat, and
+	// running it here would be spending our own bond into a claim the
+	// opponent then answers and keeps.
+	if against == mine {
+		return fmt.Errorf("the chain against seat %d is this seat's own, and is not ours to run", against)
 	}
 	r.mu.Lock()
-	l := t.ladder
+	l := t.ladders[against]
 	r.mu.Unlock()
 	if l == nil {
-		return fmt.Errorf("no accusation chain has been built at this table")
+		return fmt.Errorf("no accusation chain against seat %d has been built at this table", against)
 	}
 	if l.against != against {
 		return fmt.Errorf("the chain at this table is against seat %d, not %d", l.against, against)
@@ -297,15 +359,26 @@ func (r *Runtime) Ladder(match string) (ready, run int, ok bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	t, found := r.tables[match]
-	if !found || t.ladder == nil {
+	if !found || t.form == nil {
 		return 0, 0, false
 	}
-	for _, tx := range t.ladder.ready {
+	mine, seated := t.form.OurSeat()
+	if !seated {
+		return 0, 0, false
+	}
+	// The chain against the opponent, which is the one this peer could run.
+	// The chain against itself is not this peer's to count: it exists so
+	// the opponent can run it.
+	l := t.ladders[1-mine]
+	if l == nil {
+		return 0, 0, false
+	}
+	for _, tx := range l.ready {
 		if tx != nil {
 			ready++
 		}
 	}
-	return ready, t.ladder.run, true
+	return ready, l.run, true
 }
 
 // AnswerAccusation is the accused seat replying to a rung: the claimed bond
@@ -361,11 +434,13 @@ func (r *Runtime) TakeExpiredClaim(ctx context.Context, match, claimedOutpoint s
 	if r.isSweeping(claimedOutpoint) {
 		return fmt.Errorf("a take of %s is already on its way from this process", claimedOutpoint)
 	}
+	// The chain against the opponent, which is the only one this peer could
+	// be taking from. The one against itself exists to be run at it.
 	r.mu.Lock()
-	l := t.ladder
+	l := t.ladders[1-mine]
 	r.mu.Unlock()
 	if l == nil {
-		return fmt.Errorf("no accusation chain has been built at this table")
+		return fmt.Errorf("no accusation chain against seat %d has been built at this table", 1-mine)
 	}
 	if l.against == mine {
 		return fmt.Errorf("this seat cannot take a claim against itself")

@@ -139,6 +139,7 @@ func (r *Runtime) adoptPunishKey(ctx context.Context, match string, n membership
 		// change what can punish it.
 		return fmt.Errorf("seat %d has already announced a different punishment key", n.Seat)
 	}
+	_, repeat := t.punishPubs[n.Seat]
 	t.punishPubs[n.Seat] = n.Pub
 	ready := len(t.punishPubs) == len(seats)
 	r.mu.Unlock()
@@ -146,6 +147,17 @@ func (r *Runtime) adoptPunishKey(ctx context.Context, match string, n membership
 	// An announcement arrives once. Without it a resumed table cannot
 	// rebuild the bond that names it, so nothing could be punished.
 	r.keep(t)
+
+	// Hearing one twice means the other side is still short of ours: a seat
+	// repeats only while something is missing, and once it has everything
+	// it falls silent. So the peer that finished first has to answer, or
+	// the one that missed the first announcement waits forever - and a
+	// table one announcement short has no forfeitable bonds at all.
+	if repeat {
+		if err := r.announcePunishKey(ctx, match); err != nil {
+			r.log.Debugf("table %s: answering a repeated announcement: %v", match, err)
+		}
+	}
 	if ready {
 		return r.buildForfeitableBonds(t)
 	}
@@ -256,6 +268,11 @@ func (r *Runtime) FundForfeitBond(ctx context.Context, match string) error {
 	t.forfeitFunded[mine] = out
 	r.mu.Unlock()
 	r.keep(t)
+	// The opponent cannot build the chain that punishes this seat without
+	// knowing where the bond it spends is, and only this seat saw it land.
+	if err := r.announceBonded(ctx, match, forfeitableBond); err != nil {
+		r.log.Warnf("table %s: saying where the forfeitable bond is: %v", match, err)
+	}
 	return nil
 }
 
