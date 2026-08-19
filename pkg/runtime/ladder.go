@@ -519,3 +519,46 @@ func (r *Runtime) sendPunishment(ctx context.Context, tx *wire.MsgTx, outpoint, 
 	r.log.Infof("%s of %s sent in %s", what, outpoint, txid)
 	return nil
 }
+
+// answerAnyClaim answers an accusation standing against this seat's own bond.
+//
+// Run every block, because not answering is what costs the bond. A rung spends
+// the accused's table bond into a coin the accused can take straight back for
+// one fee, and the whole design rests on that being cheap and automatic: a
+// seat that has to notice a claim by hand loses its bond the first time it is
+// asleep, and an accusation nobody answers is a false one that pays.
+//
+// The claim does not have to be discovered. Both seats hold both chains, so
+// the accused already knows the exact transaction each rung is - it signed
+// them - and only has to look on chain for whether one of them is there.
+func (r *Runtime) answerAnyClaim(ctx context.Context, t *table) {
+	mine, seated := t.form.OurSeat()
+	if !seated {
+		return
+	}
+	r.mu.Lock()
+	l := t.ladders[mine]
+	r.mu.Unlock()
+	if l == nil {
+		return
+	}
+	for _, rung := range l.rungs {
+		outpoint := rung.TxHash().String() + ":0"
+		if r.isSweeping(outpoint) {
+			continue
+		}
+		out, err := r.bridge.Outpoint(ctx, rung.TxHash().String(), 0)
+		if err != nil || !out.Found {
+			// Not on chain, or already answered and gone. Either way
+			// there is nothing standing against this seat here.
+			continue
+		}
+		if err := r.AnswerAccusation(ctx, t.match, outpoint); err != nil {
+			r.log.Warnf("table %s: answering the claim at %s: %v", t.match, outpoint, err)
+		}
+		// One a block. The accuser runs one rung at a time, so there is
+		// never more than one standing, and answering the rest would be
+		// answering claims nobody has made.
+		return
+	}
+}

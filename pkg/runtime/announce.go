@@ -456,6 +456,9 @@ func (r *Runtime) tickTable(ctx context.Context, t *table, height int64) {
 	if err := r.seatIfReady(ctx, t.match); err != nil {
 		r.log.Debugf("table %s: not seated yet: %v", t.match, err)
 	}
+	// Before anything else this block: an unanswered accusation costs the
+	// whole bond, and the window it has to be answered in is short.
+	r.answerAnyClaim(ctx, t)
 
 	r.mu.Lock()
 	said := t.saidAt

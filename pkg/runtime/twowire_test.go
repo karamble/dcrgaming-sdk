@@ -17,6 +17,7 @@ import (
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/wire"
 	"github.com/karamble/dcrgaming-sdk/pkg/identity"
 	"github.com/karamble/dcrgaming-sdk/pkg/membership"
+	"github.com/karamble/dcrgaming-sdk/pkg/ruling"
 	"github.com/karamble/dcrgaming-sdk/pkg/spend"
 )
 
@@ -677,6 +678,26 @@ func TestTwoRuntimesBuildEachOthersLadders(t *testing.T) {
 	if aRun != 0 || bRun != 0 {
 		t.Fatalf("a rung has been run before anybody was accused: %d and %d", aRun, bRun)
 	}
+
+	// An accusation is answered without anybody noticing it by hand. Not
+	// answering costs the whole bond, so a seat that had to be watching
+	// would lose it the first time it was asleep - and a false accusation
+	// nobody answered would pay.
+	mine, _ := seatOfRuntime(one, sid)
+	if err := one.Forfeit(ctx, ruling.Ruling{
+		Match: sid, Against: 1 - mine, Kind: ruling.Silence,
+		Silent: &ruling.Silent{Duty: "place", Seq: 1, By: uint32(fake.Height())},
+	}); err != nil {
+		t.Fatalf("accusing: %v", err)
+	}
+	if _, run, _ := one.Ladder(sid); run != 1 {
+		t.Fatalf("%d rungs were run for one accusation", run)
+	}
+	before := len(fake.Broadcasts())
+	waitFor(t, "the accused to answer without being told", func() bool {
+		block()
+		return len(fake.Broadcasts()) > before
+	})
 
 	// And the asymmetric case, which is the one that hangs: a peer that is
 	// short of a signature while the other has everything. The one with
