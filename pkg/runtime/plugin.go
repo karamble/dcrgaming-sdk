@@ -8,13 +8,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/decred/dcrd/dcrec/secp256k1/v4"
-
 	"github.com/karamble/dcrgaming-sdk/pkg/evidence"
 	"github.com/karamble/dcrgaming-sdk/pkg/forfeit"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/gamingpb"
 	"github.com/karamble/dcrgaming-sdk/pkg/punish"
-	"github.com/karamble/dcrgaming-sdk/pkg/ruling"
 )
 
 // gcID is the group chat a table lives in: 64 lowercase hex characters.
@@ -206,32 +203,6 @@ func (r *Runtime) gameState(ctx context.Context) (st *gamingpb.GameState) {
 	return st
 }
 
-// Forfeit carries out a ruling the game has made.
-//
-// Kept only so a game still on the ruling shape keeps working; it is a thin
-// translation into the verbs below and is going away. New code calls Seize,
-// Accuse or Release directly.
-func (r *Runtime) Forfeit(ctx context.Context, rl ruling.Ruling) error {
-	if err := rl.Validate(); err != nil {
-		return err
-	}
-	switch rl.Kind {
-	case ruling.Equivocation:
-		recovered, err := rl.Equivocated.Recover()
-		if err != nil {
-			return fmt.Errorf("this equivocation exposes no key, so no bond may be swept: %w", err)
-		}
-		return r.seize(ctx, rl.Match, rl.Against, recovered)
-	case ruling.Silence:
-		return r.Accuse(ctx, rl.Match, rl.Against, Lapsed{
-			Duty: rl.Silent.Duty, Seq: rl.Silent.Seq, By: rl.Silent.By,
-		})
-	case ruling.Clean:
-		return r.Release(ctx, rl.Match)
-	}
-	return fmt.Errorf("this runtime does not know how to carry out a %s ruling", rl.Kind)
-}
-
 // Seize takes a seat's forfeitable bond, using the key its own signatures gave
 // up.
 //
@@ -260,15 +231,10 @@ func (r *Runtime) Forfeit(ctx context.Context, rl ruling.Ruling) error {
 // The key is used and not kept: it is never stored on the table and never
 // logged.
 func (r *Runtime) Seize(ctx context.Context, match string, seat uint32, exposed *evidence.Exposed) error {
-	if exposed.Key() == nil {
+	recovered := exposed.Key()
+	if recovered == nil {
 		return fmt.Errorf("no key was exposed, so there is no bond to seize")
 	}
-	return r.seize(ctx, match, seat, exposed.Key())
-}
-
-// seize is the sweep itself, over a bare key, so Forfeit's translation can
-// reach it without minting an evidence.Exposed it never held the halves for.
-func (r *Runtime) seize(ctx context.Context, match string, seat uint32, recovered *secp256k1.PrivateKey) error {
 	r.mu.Lock()
 	t, ok := r.tables[match]
 	r.mu.Unlock()

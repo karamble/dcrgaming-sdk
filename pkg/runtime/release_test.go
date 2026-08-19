@@ -12,16 +12,15 @@ import (
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/bridgetest"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
 	"github.com/karamble/dcrgaming-sdk/pkg/punish"
-	"github.com/karamble/dcrgaming-sdk/pkg/ruling"
 )
 
-// A clean ruling releases the table bond, and it needs the bond on the chain
+// A release needs the bond on the chain
 // and somewhere to pay it.
-func TestACleanRulingNeedsTheBondAndAPayout(t *testing.T) {
+func TestAReleaseNeedsTheBondAndAPayout(t *testing.T) {
 	fake, rt, _ := stand(t, &trivialGame{})
 	sid, _ := seatTwo(t, fake, rt)
 
-	err := rt.Forfeit(context.Background(), ruling.Ruling{Match: sid, Kind: ruling.Clean})
+	err := rt.Release(context.Background(), sid)
 	if err == nil {
 		t.Fatal("released a bond that is not on the chain")
 	}
@@ -57,7 +56,7 @@ func TestATableBondBothSeatsSignGoesHome(t *testing.T) {
 	fake, rt, _ := stand(t, &trivialGame{})
 	sid, them := readyToRelease(t, rt, fake)
 
-	if err := rt.Forfeit(context.Background(), ruling.Ruling{Match: sid, Kind: ruling.Clean}); err != nil {
+	if err := rt.Release(context.Background(), sid); err != nil {
 		t.Fatalf("release: %v", err)
 	}
 	rt.mu.Lock()
@@ -102,7 +101,7 @@ func TestAReleaseIsNotSentShortOfASignature(t *testing.T) {
 	fake, rt, _ := stand(t, &trivialGame{})
 	sid, _ := readyToRelease(t, rt, fake)
 
-	if err := rt.Forfeit(context.Background(), ruling.Ruling{Match: sid, Kind: ruling.Clean}); err != nil {
+	if err := rt.Release(context.Background(), sid); err != nil {
 		t.Fatalf("release: %v", err)
 	}
 	done := ourRelease(rt, sid).done
@@ -171,7 +170,7 @@ func hexOf(b []byte) string { return hex.EncodeToString(b) }
 func TestAStrangersReleaseSignatureIsRefused(t *testing.T) {
 	fake, rt, _ := stand(t, &trivialGame{})
 	sid, _ := readyToRelease(t, rt, fake)
-	if err := rt.Forfeit(context.Background(), ruling.Ruling{Match: sid, Kind: ruling.Clean}); err != nil {
+	if err := rt.Release(context.Background(), sid); err != nil {
 		t.Fatalf("release: %v", err)
 	}
 	stranger := make([]byte, 33)

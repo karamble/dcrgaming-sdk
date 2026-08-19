@@ -10,7 +10,6 @@ import (
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/bridgetest"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
 	"github.com/karamble/dcrgaming-sdk/pkg/membership"
-	"github.com/karamble/dcrgaming-sdk/pkg/ruling"
 )
 
 // bondedTwo seats two, sets payouts, and puts BOTH table bonds on the chain -
@@ -144,10 +143,7 @@ func TestNoRungRunsBeforeItIsCoSigned(t *testing.T) {
 		t.Fatalf("presign: %v", err)
 	}
 	mine := ourSeatOf(t, rt, sid)
-	err := rt.Forfeit(context.Background(), ruling.Ruling{
-		Match: sid, Against: 1 - mine, Kind: ruling.Silence,
-		Silent: &ruling.Silent{Duty: "place", Seq: 1, By: 900},
-	})
+	err := rt.Accuse(context.Background(), sid, 1-mine, Lapsed{Duty: "place", Seq: 1, By: 900})
 	if err == nil {
 		t.Fatal("ran a rung nobody had co-signed")
 	}
@@ -169,10 +165,7 @@ func TestASeatCannotRunTheChainAgainstItself(t *testing.T) {
 		t.Fatalf("presign: %v", err)
 	}
 	mine := ourSeatOf(t, rt, sid)
-	err := rt.Forfeit(context.Background(), ruling.Ruling{
-		Match: sid, Against: mine, Kind: ruling.Silence,
-		Silent: &ruling.Silent{Duty: "place", Seq: 1, By: 900},
-	})
+	err := rt.Accuse(context.Background(), sid, mine, Lapsed{Duty: "place", Seq: 1, By: 900})
 	if err == nil {
 		t.Fatal("ran a chain against the wrong seat")
 	}
@@ -185,10 +178,7 @@ func TestASeatCannotRunTheChainAgainstItself(t *testing.T) {
 func TestRunningAChainThatWasNeverBuiltIsRefused(t *testing.T) {
 	fake, rt, _ := stand(t, &trivialGame{})
 	sid, _ := seatTwo(t, fake, rt)
-	err := rt.Forfeit(context.Background(), ruling.Ruling{
-		Match: sid, Against: 1, Kind: ruling.Silence,
-		Silent: &ruling.Silent{Duty: "place", Seq: 1, By: 900},
-	})
+	err := rt.Accuse(context.Background(), sid, 1, Lapsed{Duty: "place", Seq: 1, By: 900})
 	if err == nil {
 		t.Fatal("ran a chain that was never built")
 	}
@@ -440,10 +430,7 @@ func TestAChainIsNotOpenedBeforeTheDutyHasLapsed(t *testing.T) {
 	mine := ourSeatOf(t, rt, sid)
 	ahead := uint32(fake.Height() + 10)
 
-	err := rt.Forfeit(context.Background(), ruling.Ruling{
-		Match: sid, Against: 1 - mine, Kind: ruling.Silence,
-		Silent: &ruling.Silent{Duty: "answer", Seq: 1, By: ahead},
-	})
+	err := rt.Accuse(context.Background(), sid, 1-mine, Lapsed{Duty: "answer", Seq: 1, By: ahead})
 	if err == nil {
 		t.Fatal("opened a chain against a duty that has not lapsed yet")
 	}
@@ -454,15 +441,12 @@ func TestAChainIsNotOpenedBeforeTheDutyHasLapsed(t *testing.T) {
 		t.Fatalf("%d rungs were run anyway", run)
 	}
 
-	// Once the chain has passed it, the same ruling gets past this gate. It
+	// Once the chain has passed it, the same accusation gets past this gate. It
 	// stops at the next one - a single peer's chain has only its own
 	// signature - and that is the point: the refusal has changed, so the
 	// height is no longer what is standing in the way.
 	fake.SetHeight(int64(ahead))
-	err = rt.Forfeit(context.Background(), ruling.Ruling{
-		Match: sid, Against: 1 - mine, Kind: ruling.Silence,
-		Silent: &ruling.Silent{Duty: "answer", Seq: 1, By: ahead},
-	})
+	err = rt.Accuse(context.Background(), sid, 1-mine, Lapsed{Duty: "answer", Seq: 1, By: ahead})
 	if err == nil {
 		t.Fatal("a chain with one signature was run")
 	}

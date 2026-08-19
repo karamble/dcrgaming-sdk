@@ -18,7 +18,6 @@ import (
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/wire"
 	"github.com/karamble/dcrgaming-sdk/pkg/identity"
 	"github.com/karamble/dcrgaming-sdk/pkg/membership"
-	"github.com/karamble/dcrgaming-sdk/pkg/ruling"
 	"github.com/karamble/dcrgaming-sdk/pkg/spend"
 )
 
@@ -685,9 +684,8 @@ func TestTwoRuntimesBuildEachOthersLadders(t *testing.T) {
 	// would lose it the first time it was asleep - and a false accusation
 	// nobody answered would pay.
 	mine, _ := seatOfRuntime(one, sid)
-	if err := one.Forfeit(ctx, ruling.Ruling{
-		Match: sid, Against: 1 - mine, Kind: ruling.Silence,
-		Silent: &ruling.Silent{Duty: "place", Seq: 1, By: uint32(fake.Height())},
+	if err := one.Accuse(ctx, sid, 1-mine, Lapsed{
+		Duty: "place", Seq: 1, By: uint32(fake.Height()),
 	}); err != nil {
 		t.Fatalf("accusing: %v", err)
 	}
@@ -1349,9 +1347,8 @@ func TestASeatThatAnswersEveryAccusationKeepsItsBond(t *testing.T) {
 	// asked, which is the behaviour under test.
 	mine, _ := seatOfRuntime(one, sid)
 	accuse := func() error {
-		return one.Forfeit(ctx, ruling.Ruling{
-			Match: sid, Against: 1 - mine, Kind: ruling.Silence,
-			Silent: &ruling.Silent{Duty: "answer", Seq: 1, By: uint32(fake.Height())},
+		return one.Accuse(ctx, sid, 1-mine, Lapsed{
+			Duty: "answer", Seq: 1, By: uint32(fake.Height()),
 		})
 	}
 	for run := 1; run <= depth; run++ {

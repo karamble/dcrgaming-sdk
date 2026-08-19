@@ -13,7 +13,6 @@ import (
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/transport"
 	"github.com/karamble/dcrgaming-sdk/pkg/identity"
-	"github.com/karamble/dcrgaming-sdk/pkg/ruling"
 	"github.com/karamble/dcrgaming-sdk/pkg/spend"
 )
 
@@ -257,18 +256,25 @@ func TestOnlyATableThisGameIsAtMayAllocateState(t *testing.T) {
 	}
 }
 
-// A malformed ruling is refused before the stage that would spend on it exists,
-// so a game integrating now finds out now.
-func TestAMalformedRulingIsRefusedBeforeAnythingIsSpent(t *testing.T) {
+// A forfeiture is refused before the stage that would spend on it exists, so a
+// game integrating now finds out now. One case per verb: none of them is
+// allowed to reach for money on a table this peer is not at.
+func TestAMalformedForfeitureIsRefusedBeforeAnythingIsSpent(t *testing.T) {
 	_, rt, _ := stand(t, &trivialGame{})
 	ctx := context.Background()
 
-	if err := rt.Forfeit(ctx, ruling.Ruling{Kind: ruling.Equivocation}); err == nil {
-		t.Fatal("accepted an equivocation ruling with no proof")
+	if err := rt.Seize(ctx, "m1", 1, nil); err == nil {
+		t.Fatal("accepted a seizure with no key")
+	}
+	if err := rt.Accuse(ctx, "m1", 1, Lapsed{Seq: 1, By: 900}); err == nil {
+		t.Fatal("accepted an accusation that does not say what was owed")
+	}
+	if err := rt.Accuse(ctx, "m1", 1, Lapsed{Duty: "place", Seq: 1}); err == nil {
+		t.Fatal("accepted an accusation that does not say when the duty lapsed")
 	}
 	// Well formed, but for a table this game is not at.
-	if err := rt.Forfeit(ctx, ruling.Ruling{Match: "m1", Kind: ruling.Clean}); err == nil {
-		t.Fatal("carried out a ruling at a table this game is not at")
+	if err := rt.Release(ctx, "m1"); err == nil {
+		t.Fatal("released a bond at a table this game is not at")
 	}
 }
 

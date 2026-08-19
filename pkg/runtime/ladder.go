@@ -342,7 +342,7 @@ func (r *Runtime) Accuse(ctx context.Context, match string, seat uint32, lapsed 
 	}
 	if by := int64(lapsed.By); tip.Height < by {
 		return fmt.Errorf(
-			"this ruling says the duty lapsed at height %d and the chain is at %d; "+
+			"this accusation says the duty lapsed at height %d and the chain is at %d; "+
 				"accusing now would spend a bond the accused has not yet had a chance to defend",
 			by, tip.Height)
 	}

@@ -7,7 +7,6 @@ import (
 	"github.com/karamble/dcrgaming-sdk/pkg/forfeit"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/wire"
-	"github.com/karamble/dcrgaming-sdk/pkg/ruling"
 )
 
 // Chain is what a game may read about the chain, and no more.
@@ -44,12 +43,6 @@ type Game interface {
 	// for - which today is all of them, but that is the script's statement
 	// and not this method's.
 	Settle(ctx context.Context, match string, out Outcome) error
-
-	// Forfeit carries out a forfeiture on the old ruling shape.
-	//
-	// Deprecated: a translation into the three verbs below, kept so a game
-	// still on it keeps working. It is going away; call them directly.
-	Forfeit(ctx context.Context, r ruling.Ruling) error
 
 	// Seize spends a branch of a seat's forfeitable bond, using the key that
 	// seat's own signatures gave up.

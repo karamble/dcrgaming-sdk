@@ -3,15 +3,18 @@ package runtime
 import (
 	"context"
 	"encoding/hex"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/decred/dcrd/crypto/blake256"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 
+	"github.com/karamble/dcrgaming-sdk/pkg/escrow"
+	"github.com/karamble/dcrgaming-sdk/pkg/evidence"
 	"github.com/karamble/dcrgaming-sdk/pkg/forfeit"
+	"github.com/karamble/dcrgaming-sdk/pkg/gaming/bridgetest"
 	"github.com/karamble/dcrgaming-sdk/pkg/membership"
-	"github.com/karamble/dcrgaming-sdk/pkg/ruling"
 )
 
 // theirPunishNote is the other seat announcing its punishment key, the way it
@@ -206,10 +209,7 @@ func TestSweepingAnUnfundedBondIsRefused(t *testing.T) {
 	mine := ourSeatOf(t, rt, sid)
 	against := uint32(1 - mine)
 
-	err := rt.Forfeit(context.Background(), ruling.Ruling{
-		Match: sid, Against: against, Kind: ruling.Equivocation,
-		Equivocated: equivocationAt(t),
-	})
+	err := rt.Seize(context.Background(), sid, against, exposedFor(t, them.creds.Log))
 	if err == nil {
 		t.Fatal("swept a bond nobody had funded")
 	}
@@ -218,60 +218,144 @@ func TestSweepingAnUnfundedBondIsRefused(t *testing.T) {
 	}
 }
 
-// The two kinds that still need an exchange say so, rather than guessing.
-func TestTheRulingKindsThatNeedTheLadderSaySo(t *testing.T) {
+// The two verbs that still need an exchange say so at a table this peer is not
+// at, rather than guessing.
+func TestTheVerbsThatNeedTheLadderSaySo(t *testing.T) {
 	_, rt, _ := stand(t, &trivialGame{})
-	for _, rl := range []ruling.Ruling{
-		{Match: "abcdef01", Kind: ruling.Silence, Silent: &ruling.Silent{Duty: "place", By: 900}},
-		{Match: "abcdef01", Kind: ruling.Clean},
-	} {
-		if err := rt.Forfeit(context.Background(), rl); err == nil {
-			t.Errorf("%s: carried out a stage that is not built", rl.Kind)
-		}
+	ctx := context.Background()
+	if err := rt.Accuse(ctx, "abcdef01", 1, Lapsed{Duty: "place", Seq: 1, By: 900}); err == nil {
+		t.Error("accused at a table this peer is not at")
+	}
+	if err := rt.Release(ctx, "abcdef01"); err == nil {
+		t.Error("released at a table this peer is not at")
 	}
 }
 
-// An equivocation that exposes no key sweeps nothing, checked before any table
-// is even looked at.
-func TestARulingThatExposesNoKeySweepsNothing(t *testing.T) {
-	fake, rt, _ := stand(t, &trivialGame{})
-	sid, _ := seatTwo(t, fake, rt)
-
-	e := equivocationAt(t)
-	e.SigB = append([]byte(nil), e.SigB...)
-	e.SigB[0] ^= 0xff // no longer shares the nonce
-	err := rt.Forfeit(context.Background(), ruling.Ruling{
-		Match: sid, Against: 1, Kind: ruling.Equivocation, Equivocated: e,
-	})
-	if err == nil {
-		t.Fatal("swept a bond on an equivocation that exposes nothing")
+// exposedFor mints the evidence store's proof-of-exposure for a key, the way a
+// game reaches one: two divergent signatures at one position, recorded.
+func exposedFor(t *testing.T, priv *secp256k1.PrivateKey) *evidence.Exposed {
+	t.Helper()
+	pos := forfeit.Position{Match: "m", Domain: forfeit.DomainEntry, Seq: 4}
+	digA := blake256.Sum256([]byte("seat 1 says left"))
+	digB := blake256.Sum256([]byte("seat 1 says right"))
+	sigA, err := forfeit.Sign(priv, pos, digA[:])
+	if err != nil {
+		t.Fatalf("sign a: %v", err)
 	}
-	if !strings.Contains(err.Error(), "exposes no key") {
+	sigB, err := forfeit.Sign(priv, pos, digB[:])
+	if err != nil {
+		t.Fatalf("sign b: %v", err)
+	}
+	store, err := evidence.Open(filepath.Join(t.TempDir(), "evidence.json"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if _, err := store.Record(priv.PubKey(), pos, digA, sigA); err != nil {
+		t.Fatalf("first half: %v", err)
+	}
+	got, err := store.Record(priv.PubKey(), pos, digB, sigB)
+	if err != nil || got == nil {
+		t.Fatalf("a divergent pair recovered nothing: %v", err)
+	}
+	return got
+}
+
+// readyToSeize seats two, announces both punishment keys, pins a payout and
+// puts the other seat's forfeitable bond on the chain: everything a seizure
+// needs except the key.
+func readyToSeize(t *testing.T, fake *bridgetest.Bridge, rt *Runtime) (string, *peer, uint32) {
+	t.Helper()
+	sid, them := seatTwo(t, fake, rt)
+	if err := rt.adoptPunishKey(context.Background(), sid, theirPunishNote(t, rt, sid, them)); err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	if err := rt.setPayout(context.Background(), payTo(t)); err != nil {
+		t.Fatalf("set payout: %v", err)
+	}
+	against := uint32(1 - ourSeatOf(t, rt, sid))
+	bond, ok := rt.ForfeitableBond(sid, against)
+	if !ok {
+		t.Fatalf("seat %d has no forfeitable bond", against)
+	}
+	script, err := hex.DecodeString(bond.PkScriptHex)
+	if err != nil {
+		t.Fatalf("pkScript: %v", err)
+	}
+	txid := strings.Repeat("f1", 32)
+	fake.Place(txid, 0, script, int64(escrow.MinBondAtoms), fake.Height())
+	rt.mu.Lock()
+	tbl := rt.tables[sid]
+	if tbl.forfeitFunded == nil {
+		tbl.forfeitFunded = map[uint32]staked{}
+	}
+	tbl.forfeitFunded[against] = staked{outpoint: txid + ":0", atoms: int64(escrow.MinBondAtoms)}
+	rt.mu.Unlock()
+	return sid, them, against
+}
+
+// The happy path at the boundary a game sees: the accused's own key opens a
+// branch of the bond this runtime derived, and the bond moves.
+func TestSeizingWithTheSeatsOwnKeyTakesTheBond(t *testing.T) {
+	fake, rt, _ := stand(t, &trivialGame{})
+	sid, them, against := readyToSeize(t, fake, rt)
+
+	if err := rt.Seize(context.Background(), sid, against, exposedFor(t, them.creds.Log)); err != nil {
+		t.Fatalf("seize: %v", err)
+	}
+	rt.mu.Lock()
+	outpoint := rt.tables[sid].forfeitFunded[against].outpoint
+	rt.mu.Unlock()
+	if !rt.isSweeping(outpoint) {
+		t.Fatal("the bond was not swept")
+	}
+}
+
+// The pin that licenses this runtime not re-deriving what escrow already
+// refuses: a key that is not the accused's opens no branch, and nothing is
+// built or sent.
+func TestSeizingWithAKeyThatIsNotTheSeatsSeizesNothing(t *testing.T) {
+	fake, rt, _ := stand(t, &trivialGame{})
+	sid, _, against := readyToSeize(t, fake, rt)
+
+	stranger, err := secp256k1.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("key: %v", err)
+	}
+	err = rt.Seize(context.Background(), sid, against, exposedFor(t, stranger))
+	if err == nil {
+		t.Fatal("swept a bond with a key that is not the accused's")
+	}
+	if !strings.Contains(err.Error(), "punishment branch") {
+		t.Fatalf("refused for the wrong reason: %v", err)
+	}
+	rt.mu.Lock()
+	outpoint := rt.tables[sid].forfeitFunded[against].outpoint
+	rt.mu.Unlock()
+	if rt.isSweeping(outpoint) {
+		t.Fatal("a refused seizure still marked the bond as being spent")
+	}
+}
+
+// A seat does not seize from itself, and says so rather than failing four
+// frames down as a bond with no branch for that key.
+func TestASeatDoesNotSeizeItsOwnBond(t *testing.T) {
+	fake, rt, _ := stand(t, &trivialGame{})
+	sid, them, _ := readyToSeize(t, fake, rt)
+
+	mine := ourSeatOf(t, rt, sid)
+	err := rt.Seize(context.Background(), sid, mine, exposedFor(t, them.creds.Log))
+	if err == nil {
+		t.Fatal("seized this seat's own bond")
+	}
+	if !strings.Contains(err.Error(), "not seized from oneself") {
 		t.Fatalf("refused for the wrong reason: %v", err)
 	}
 }
 
-// equivocationAt is a real pair of signatures at one position: two different
-// statements, one nonce, so the key falls out.
-func equivocationAt(t *testing.T) *ruling.Equivocated {
-	t.Helper()
-	k, err := secp256k1.GeneratePrivateKey()
-	if err != nil {
-		t.Fatalf("key: %v", err)
-	}
-	at := forfeit.Position{Match: "m", Domain: forfeit.DomainEntry, Seq: 4}
-	a := blake256.Sum256([]byte("seat 1 says left"))
-	b := blake256.Sum256([]byte("seat 1 says right"))
-	sigA, err := forfeit.Sign(k, at, a[:])
-	if err != nil {
-		t.Fatalf("sign a: %v", err)
-	}
-	sigB, err := forfeit.Sign(k, at, b[:])
-	if err != nil {
-		t.Fatalf("sign b: %v", err)
-	}
-	return &ruling.Equivocated{
-		At: at, Pub: k.PubKey().SerializeCompressed(),
-		HashA: a[:], SigA: sigA, HashB: b[:], SigB: sigB,
+// A seizure with nothing exposed is refused before any table is looked at.
+func TestSeizingWithNoKeyTakesNothing(t *testing.T) {
+	_, rt, _ := stand(t, &trivialGame{})
+	if err := rt.Seize(context.Background(), "abcdef01", 1, nil); err == nil {
+		t.Fatal("seized on no key at all")
 	}
 }

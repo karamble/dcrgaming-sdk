@@ -16,13 +16,24 @@
 //
 // # What the game pushes back
 //
-// Two things flow the other way, and both are decisions only the game can make:
+// Five things flow the other way, and every one of them is a decision only the
+// game can make. Four are money, and none of them names a game:
 //
-//   - An outcome. The runtime does not know who won.
-//   - A ruling. The runtime does not know who cheated. See [pkg/ruling] - the
-//     SDK executes a forfeiture, it never decides one.
+//   - [Runtime.Settle], who is paid. The runtime does not know who won.
+//   - [Runtime.Seize], spend a branch of a seat's bond that seat's own key
+//     opened. The runtime is not told what the cheat was, and there is no kind
+//     of cheating for it to have heard of.
+//   - [Runtime.Accuse], open a chain against a seat that stopped answering.
+//     The game says what was owed, in its own words; the chain says whether it
+//     is late.
+//   - [Runtime.Release], hand this seat's own table bond back.
 //
-// Those are methods on the runtime rather than on Rules, because they happen
+// The fifth is a refusal rather than an instruction: [CoSigning] lets a game
+// withhold its signature, which is the only answer some rulings have. Deciding
+// that somebody cheated is a rule and rules are the game's; what a runtime is
+// told is which money to move.
+//
+// The four are methods on the runtime rather than on Rules, because they happen
 // when the game's rules say so and not when the runtime asks.
 //
 // # What the game reads
