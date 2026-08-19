@@ -235,7 +235,38 @@ func (r *Runtime) Funded(match string, seat uint32) (outpoint string, atoms int6
 	if !found {
 		return "", 0, false
 	}
-	s, has := t.funded[seat]
+	return paidAt(t.funded, seat)
+}
+
+// Bonded reports where a seat's table bond landed, which is what it stakes
+// against staying reachable.
+func (r *Runtime) Bonded(match string, seat uint32) (outpoint string, atoms int64, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t, found := r.tables[match]
+	if !found {
+		return "", 0, false
+	}
+	return paidAt(t.tableBondFunded, seat)
+}
+
+// ForfeitFunded reports where a seat's forfeitable bond landed, which is what
+// it stakes against telling the truth.
+func (r *Runtime) ForfeitFunded(match string, seat uint32) (outpoint string, atoms int64, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t, found := r.tables[match]
+	if !found {
+		return "", 0, false
+	}
+	return paidAt(t.forfeitFunded, seat)
+}
+
+// paidAt reads one seat's entry out of a set of paid outputs, and reports a
+// seat with nothing there as not paid rather than as paid nothing. Caller
+// holds the lock.
+func paidAt(held map[uint32]staked, seat uint32) (string, int64, bool) {
+	s, has := held[seat]
 	if !has || s.outpoint == "" {
 		return "", 0, false
 	}
