@@ -55,6 +55,9 @@ type TableRecord struct {
 
 	// Where the money went. A seat's stake, its table bond and its
 	// forfeitable bond each land in their own output.
+	// SeatBond is what this seat's join binds to, for a game that posts one
+	// per table. Empty where the bond is the identity's.
+	SeatBond      Funded            `json:"seatBond,omitempty"`
 	Funded        map[uint32]Funded `json:"funded,omitempty"`
 	TableBonds    map[uint32]Funded `json:"tableBonds,omitempty"`
 	ForfeitBonds  map[uint32]Funded `json:"forfeitBonds,omitempty"`
@@ -111,7 +114,14 @@ func (r *Runtime) snapshot(t *table) TableRecord {
 
 // snapshotLocked renders a table as it stands. Caller holds r.mu.
 func (r *Runtime) snapshotLocked(t *table) TableRecord {
-	rec := TableRecord{Match: t.match, GCID: t.gcID, Terms: t.form.Terms()}
+	rec := TableRecord{Match: t.match, GCID: t.gcID, Terms: t.terms}
+	if t.form == nil {
+		// Accepted but not yet joined: the terms and whatever its seat
+		// bond has cost so far, which is the whole of what it knows.
+		rec.SeatBond = Funded{Outpoint: t.seatBond.outpoint, Atoms: t.seatBond.atoms}
+		return rec
+	}
+	rec.Terms = t.form.Terms()
 	for _, j := range t.form.Joins() {
 		rec.Joins = append(rec.Joins, schema.JoinFrom(j))
 	}
@@ -128,6 +138,7 @@ func (r *Runtime) snapshotLocked(t *table) TableRecord {
 		rec.Aborted, rec.Reason = true, t.form.Reason()
 	}
 
+	rec.SeatBond = Funded{Outpoint: t.seatBond.outpoint, Atoms: t.seatBond.atoms}
 	rec.Funded = fundedOf(t.funded)
 	rec.TableBonds = fundedOf(t.tableBondFunded)
 	rec.ForfeitBonds = fundedOf(t.forfeitFunded)
@@ -257,7 +268,18 @@ func (r *Runtime) resume(rec TableRecord) error {
 		r.mu.Unlock()
 		return nil
 	}
-	creds, err := r.seatCredentials(rec.Terms)
+	// The table first, because a per-table seat bond is the table's and the
+	// credentials cannot be built without knowing where it is.
+	t := &table{
+		match: rec.Match, gcID: rec.GCID, terms: rec.Terms,
+		seatBond:        staked{outpoint: rec.SeatBond.Outpoint, atoms: rec.SeatBond.Atoms},
+		funded:          stakedOf(rec.Funded),
+		tableBondFunded: stakedOf(rec.TableBonds),
+		forfeitFunded:   stakedOf(rec.ForfeitBonds),
+		payouts:         map[uint32][]byte{},
+		punishPubs:      map[uint32][]byte{},
+	}
+	creds, err := r.seatCredentials(t, rec.Terms)
 	if err != nil {
 		return err
 	}
@@ -312,14 +334,7 @@ func (r *Runtime) resume(rec TableRecord) error {
 		}
 	}
 
-	t := &table{
-		match: rec.Match, gcID: rec.GCID, form: form,
-		funded:          stakedOf(rec.Funded),
-		tableBondFunded: stakedOf(rec.TableBonds),
-		forfeitFunded:   stakedOf(rec.ForfeitBonds),
-		payouts:         map[uint32][]byte{},
-		punishPubs:      map[uint32][]byte{},
-	}
+	t.form = form
 	for seat, hexed := range rec.Payouts {
 		pay, err := hex.DecodeString(hexed)
 		if err != nil {

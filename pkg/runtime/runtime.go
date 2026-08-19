@@ -67,6 +67,11 @@ type Config struct {
 	// parameter: dcrpoker has always paid 20,000 and adopting somebody
 	// else's number would silently change bytes that move its money.
 	ReclaimFeeAtoms int64
+	// BondScope says how many seat bonds a player posts: one backing every
+	// table, or a fresh one for each. An economic choice, and the two
+	// existing games made different ones - see [BondScope]. Zero value is
+	// one per identity.
+	BondScope BondScope
 	// SeatTags are the game's own domain-separation tags for those keys.
 	// Required, and the game's to state: they are frozen hash inputs that
 	// decide which keys a seat has, so the SDK must not invent them.
@@ -93,6 +98,7 @@ type Runtime struct {
 	params     stdaddr.AddressParams
 	punishTag  []byte
 	accuseFee  uint64
+	bondScope  BondScope
 	reclaimFee int64
 	router     *transport.Router
 	log        slog.Logger
@@ -149,6 +155,15 @@ type table struct {
 	release         *release
 	ladder          *ladder
 
+	// seatBond is the bond this seat's join binds to, for a game that posts
+	// one per table. Empty for a game that posts one per identity, where
+	// the deposit is the identity's and not the table's.
+	seatBond staked
+
+	// terms are this table's, kept because a per-table seat bond has to be
+	// funded before there is a formation to ask.
+	terms membership.Terms
+
 	// saidAt is the height this table last repeated its announcements at,
 	// so they go out once a block rather than once a poll.
 	saidAt int64
@@ -203,6 +218,7 @@ func New(cfg Config) (*Runtime, error) {
 		rules: cfg.Rules, bridge: cfg.Bridge, book: cfg.Book, log: log,
 		identity: cfg.Identity, seatTags: cfg.SeatTags, params: cfg.Params,
 		punishTag: cfg.PunishTag, accuseFee: cfg.AccuseFeeAtoms,
+		bondScope:  cfg.BondScope,
 		reclaimFee: reclaimFee,
 		store:      cfg.Tables,
 		tables:     map[string]*table{},

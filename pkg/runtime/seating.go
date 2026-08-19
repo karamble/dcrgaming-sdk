@@ -8,7 +8,6 @@ import (
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 
-	"github.com/karamble/dcrgaming-sdk/pkg/escrow"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/gamingpb"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/wire"
@@ -78,14 +77,6 @@ func (r *Runtime) acceptInvite(ctx context.Context, req *gamingpb.AcceptInvite) 
 	if err != nil {
 		return "", err
 	}
-	creds, err := r.seatCredentials(terms)
-	if err != nil {
-		return "", err
-	}
-	form, err := membership.NewFormation(terms, creds)
-	if err != nil {
-		return "", fmt.Errorf("form the table: %w", err)
-	}
 
 	r.mu.Lock()
 	if why, over := r.ended[inv.SID]; over {
@@ -98,15 +89,50 @@ func (r *Runtime) acceptInvite(ctx context.Context, req *gamingpb.AcceptInvite) 
 		// button again, or a retried request, gets the same answer.
 		return inv.SID, nil
 	}
-	t := &table{match: inv.SID, gcID: gcid, form: form}
+	t := &table{match: inv.SID, gcID: gcid, terms: terms}
 	r.tables[inv.SID] = t
 	r.mu.Unlock()
 
-	r.keep(t)
-	if err := r.publishJoin(ctx, inv.SID); err != nil {
+	if r.bondScope == BondPerTable {
+		// The bond has to exist before the join that names it, and
+		// paying it waits on a person. So the table is registered now,
+		// visible and answering, and joins when its bond lands.
+		go r.joinWhenBonded(r.runCtx, t)
+		return inv.SID, nil
+	}
+	if err := r.formAndJoin(ctx, t); err != nil {
 		return "", err
 	}
 	return inv.SID, nil
+}
+
+// joinWhenBonded pays this table's seat bond and then joins with it.
+func (r *Runtime) joinWhenBonded(ctx context.Context, t *table) {
+	if err := r.FundSeatBond(ctx, t.match); err != nil {
+		r.log.Errorf("table %s: the seat bond was not paid: %v", t.match, err)
+		return
+	}
+	if err := r.formAndJoin(ctx, t); err != nil {
+		r.log.Errorf("table %s: joining: %v", t.match, err)
+	}
+}
+
+// formAndJoin builds this seat's credentials, forms the table and says so.
+func (r *Runtime) formAndJoin(ctx context.Context, t *table) error {
+	creds, err := r.seatCredentials(t, t.terms)
+	if err != nil {
+		return err
+	}
+	form, err := membership.NewFormation(t.terms, creds)
+	if err != nil {
+		return fmt.Errorf("form the table: %w", err)
+	}
+	r.mu.Lock()
+	t.form = form
+	r.mu.Unlock()
+
+	r.keep(t)
+	return r.publishJoin(ctx, t.match)
 }
 
 // termsFor composes the table's terms from the invitation and the game.
@@ -162,39 +188,27 @@ func (r *Runtime) termsFor(inv schema.Invite) (membership.Terms, error) {
 // table can be joined at all. That ordering is the mechanism rather than an
 // inconvenience: a seat whose join did not name a bond would be a seat with
 // nothing to forfeit, which is the whole thing bonds are for.
-func (r *Runtime) seatCredentials(terms membership.Terms) (membership.Credentials, error) {
+func (r *Runtime) seatCredentials(t *table, terms membership.Terms) (membership.Credentials, error) {
 	session, logKey, err := r.seatKeys(terms.SID)
 	if err != nil {
 		return membership.Credentials{}, err
 	}
-	// The bond key is derived WITHOUT the session id, and that is not an
-	// oversight. identity.BondDeposit is one outpoint per identity, so the
-	// key that opens it has to be one key per identity too. Deriving it per
-	// table would build a script the stored deposit was never paid into, and
-	// the join would bind to a bond nobody could spend.
-	bond, err := r.identity.DeriveKey(r.seatTags.Bond, "")
+	bond, err := r.seatBondKeyFor(terms.SID)
 	if err != nil {
-		return membership.Credentials{}, fmt.Errorf("derive this seat's bond key: %w", err)
+		return membership.Credentials{}, err
 	}
-	creds := membership.Credentials{Session: session, Log: logKey, Bond: bond}
-	outpoint := r.identity.BondDeposit()
-	if strings.TrimSpace(outpoint) == "" {
-		return membership.Credentials{}, fmt.Errorf(
-			"this seat has no bond deposit yet, so it has nothing to stake against its word; " +
-				"fund one before joining a table")
-	}
-	lock := terms.BondLockBlocks
-	if lock == 0 {
-		// A table that states no bond terms uses the escrow floor, which
-		// is what dcrpoker has always done.
-		lock = escrow.MinBondBlocks
-	}
-	script, err := escrow.BondScript(creds.Bond.PubKey().SerializeCompressed(), lock)
+	outpoint, err := r.seatBondOutpoint(t)
 	if err != nil {
-		return membership.Credentials{}, fmt.Errorf("build this seat's bond script: %w", err)
+		return membership.Credentials{}, err
 	}
-	creds.BondOutpoint, creds.BondScript = outpoint, script
-	return creds, nil
+	script, err := r.seatBondScript(terms)
+	if err != nil {
+		return membership.Credentials{}, err
+	}
+	return membership.Credentials{
+		Session: session, Log: logKey, Bond: bond,
+		BondOutpoint: outpoint, BondScript: script,
+	}, nil
 }
 
 // seatKeys derives the two per-table keys. The bond is not among them; see

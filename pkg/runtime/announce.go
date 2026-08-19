@@ -298,8 +298,27 @@ func (r *Runtime) outputPaying(ctx context.Context, outpoint, pkScript string) (
 	return staked{outpoint: outpoint, atoms: out.ValueAtoms}, nil
 }
 
-// tableOf finds a table by its match id.
+// tableOf finds a table that has joined.
+//
+// A table exists from the moment its invitation is accepted, but a game that
+// posts one bond per table has nothing to join with until that bond is on the
+// chain - so for a while there is a table with no formation behind it. Nothing
+// downstream is written to expect one, so it is refused here rather than
+// guarded for in a hundred places.
 func (r *Runtime) tableOf(match string) (*table, error) {
+	t, err := r.rawTable(match)
+	if err != nil {
+		return nil, err
+	}
+	if t.form == nil {
+		return nil, fmt.Errorf("table %q has not joined yet; its seat bond is still being paid", match)
+	}
+	return t, nil
+}
+
+// rawTable finds a table whether or not it has joined. For the stages that run
+// before there is a formation.
+func (r *Runtime) rawTable(match string) (*table, error) {
 	match = strings.ToLower(strings.TrimSpace(match))
 	r.mu.Lock()
 	t, ok := r.tables[match]
@@ -342,6 +361,11 @@ func (r *Runtime) Tick(ctx context.Context, height int64) {
 	r.mu.Unlock()
 
 	for _, t := range tables {
+		if t.form == nil {
+			// Still paying for its seat. Nothing to advance and
+			// nothing to repeat: it has said nothing yet.
+			continue
+		}
 		r.tickTable(ctx, t, height)
 	}
 }

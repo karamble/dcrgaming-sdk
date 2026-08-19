@@ -406,7 +406,7 @@ func forgetTheirCommit(t *testing.T, rt *Runtime, tbl *table) []byte {
 		t.Fatal("this table holds no commit but its own, so there is nothing to lose")
 	}
 
-	creds, err := rt.seatCredentials(tbl.form.Terms())
+	creds, err := rt.seatCredentials(tbl, tbl.form.Terms())
 	if err != nil {
 		t.Fatalf("credentials: %v", err)
 	}

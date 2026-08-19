@@ -220,9 +220,9 @@ func TestATableBondReclaimMustNameItsOutput(t *testing.T) {
 	}
 }
 
-// The bond key is derived without a session id, because the deposit it opens is
-// one per identity. Deriving it per table would build a script the stored
-// deposit was never paid into.
+// A game that posts one bond per identity derives its bond key without a
+// session id, because the deposit it opens is one per identity. Deriving it
+// per table would build a script the stored deposit was never paid into.
 func TestTheBondKeyDoesNotDependOnTheTable(t *testing.T) {
 	_, rt, _ := stand(t, &trivialGame{})
 	a, err := rt.identity.DeriveKey(rt.seatTags.Bond, "")
@@ -238,7 +238,7 @@ func TestTheBondKeyDoesNotDependOnTheTable(t *testing.T) {
 	}
 
 	// What a join binds to must be what a reclaim opens.
-	creds, err := rt.seatCredentials(mustTerms(t, rt, "abcdef01"))
+	creds, err := rt.seatCredentials(&table{}, mustTerms(t, rt, "abcdef01"))
 	if err != nil {
 		t.Fatalf("credentials: %v", err)
 	}
