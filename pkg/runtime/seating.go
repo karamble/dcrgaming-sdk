@@ -275,9 +275,11 @@ func (r *Runtime) seatIfReady(ctx context.Context, match string) error {
 	if t.form.Seated() {
 		return nil
 	}
-	if !t.form.WindowClosed() {
-		t.form.CloseWindow()
-	}
+	// Admission is not shut here. Closing it short of a full table aborts
+	// the table, and this runs on every arriving message - so a table would
+	// abort the moment the first join reached it, before the second player
+	// had any chance to answer. The deadline shuts admission, in Tick, at a
+	// height everybody reads the same way.
 	if !t.form.Agreed() {
 		return nil
 	}
@@ -321,4 +323,102 @@ func (r *Runtime) seatIfReady(ctx context.Context, match string) error {
 		h.Seated(ctx, match, seats)
 	}
 	return nil
+}
+
+// KindRoster carries what a peer says it holds. The runtime's own.
+const KindRoster = schema.KindRoster
+
+// publishRoster says what this peer holds, so the table can agree.
+//
+// This is what turns a pile of joins into a membership. Every peer signs a
+// claim about the set it holds, and a table forms when everybody's claim says
+// the same thing - which is why it is signed: an unsigned claim would let
+// anybody manufacture agreement and drive peers holding different join sets to
+// bind different memberships.
+//
+// Only a peer with a full table can claim one. Short of that there is nothing
+// to assert, and saying so anyway would be claiming agreement with a set
+// nobody holds. Seating is later and separate - it waits for the block it
+// draws its order from - so an assertion must not wait on it, or no table
+// would ever agree and every one would sit out its deadline.
+func (r *Runtime) publishRoster(ctx context.Context, match string) error {
+	t, err := r.tableOf(match)
+	if err != nil {
+		return err
+	}
+	var assertion *membership.Assertion
+	if a, err := t.form.Assertion(); err == nil {
+		assertion = a
+	}
+	seats := map[uint32][]byte{}
+	if s, ok := t.form.Seats(); ok {
+		seats = s
+	}
+	body := schema.RosterFrom(t.form.Terms(), seats, t.form.Joins(), assertion)
+	return r.send(ctx, t, KindRoster, body)
+}
+
+// adoptRoster takes another peer's claim about what it holds.
+//
+// The joins are what make the claim checkable, and they are checked before any
+// is kept: a member could otherwise get a key nobody joined with admitted by
+// burying it among real ones.
+func (r *Runtime) adoptRoster(ctx context.Context, match string, body schema.Roster) error {
+	t, err := r.tableOf(match)
+	if err != nil {
+		return err
+	}
+	terms := t.form.Terms()
+	joins := make([]*membership.Join, 0, len(body.Joins))
+	for i, wj := range body.Joins {
+		j, err := wj.Into()
+		if err != nil {
+			return fmt.Errorf("roster join %d: %w", i, err)
+		}
+		if err := j.Verify(terms); err != nil {
+			if body.Terms != nil && body.Terms.Into() != terms {
+				// The likelier cause, and the more useful thing
+				// to say: two peers read different invitations,
+				// so neither is wrong about its own join.
+				return fmt.Errorf(
+					"that roster was computed under different terms; we read different invitations")
+			}
+			return fmt.Errorf("roster join %d: %w", i, err)
+		}
+		joins = append(joins, j)
+	}
+
+	assertion, err := body.Assertion()
+	if err != nil {
+		return err
+	}
+	held, agreed := len(t.form.Joins()), t.form.Agreed()
+	if assertion != nil {
+		if err := t.form.AddAssertion(assertion, joins); err != nil {
+			return err
+		}
+	} else {
+		// A roster with no claim is just a carrier for joins.
+		for _, j := range joins {
+			if err := t.form.AddJoin(j); err != nil {
+				return err
+			}
+		}
+	}
+	r.keep(t)
+
+	// Answered, but only when it told us something. A peer whose own join
+	// went astray learns the table from somebody else's roster and has
+	// never said what it holds - without an answer here it never would, and
+	// the table would wait out its deadline one assertion short.
+	//
+	// Bounded by the same condition: a roster that changes nothing is not
+	// answered, so two peers that already agree fall silent instead of
+	// answering each other forever.
+	if len(t.form.Joins()) != held || t.form.Agreed() != agreed {
+		if err := r.publishRoster(ctx, match); err != nil {
+			r.log.Warnf("table %s: answering with what we hold: %v", match, err)
+		}
+	}
+	return r.seatIfReady(ctx, match)
 }

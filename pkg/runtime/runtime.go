@@ -261,7 +261,7 @@ func (r *Runtime) deliver(d transport.Delivery) {
 func (r *Runtime) ours(k schema.Kind) bool {
 	switch k {
 	case schema.KindJoin, schema.KindCommit, schema.KindSettle, KindPunishKey, KindRelease, KindAccusation,
-		KindFunded, KindBonded, KindPayout:
+		KindFunded, KindBonded, KindPayout, KindRoster:
 		return true
 	}
 	return false
@@ -277,6 +277,12 @@ func (r *Runtime) handleOurs(ctx context.Context, msg Message) error {
 		}
 		if err := r.addJoin(msg.Match, &j); err != nil {
 			return err
+		}
+		// Answered with what this peer now holds. A join arriving is the
+		// only signal that the set may have changed, and a table agrees
+		// when every peer has said the same thing about it.
+		if err := r.publishRoster(ctx, msg.Match); err != nil {
+			r.log.Warnf("table %s: saying what we hold: %v", msg.Match, err)
 		}
 		return r.seatIfReady(ctx, msg.Match)
 
@@ -296,6 +302,13 @@ func (r *Runtime) handleOurs(ctx context.Context, msg Message) error {
 			return fmt.Errorf("read a payout: %w", err)
 		}
 		return r.adoptSettlement(ctx, msg.Match, st)
+
+	case KindRoster:
+		var ros schema.Roster
+		if err := json.Unmarshal(msg.Body, &ros); err != nil {
+			return fmt.Errorf("read a roster: %w", err)
+		}
+		return r.adoptRoster(ctx, msg.Match, ros)
 
 	case KindFunded:
 		var f schema.Funded

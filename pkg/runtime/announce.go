@@ -379,6 +379,12 @@ func (r *Runtime) tickTable(ctx context.Context, t *table, height int64) {
 func (r *Runtime) repeatAnnouncements(ctx context.Context, t *table) {
 	seats, ok := t.form.Seats()
 	if !ok {
+		// Not seated yet, so what is still missing is agreement. A join
+		// or a roster that went astray leaves a table waiting for a
+		// message nobody will send again, and it sits out its deadline.
+		if err := r.publishRoster(ctx, t.match); err != nil {
+			r.log.Debugf("table %s: repeating what we hold: %v", t.match, err)
+		}
 		return
 	}
 	mine, ok := t.form.OurSeat()
