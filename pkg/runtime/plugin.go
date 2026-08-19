@@ -259,7 +259,7 @@ func (r *Runtime) sweepForfeited(ctx context.Context, rl ruling.Ruling, recovere
 		Bond:       script,
 		Prevout:    prevout,
 		ValueAtoms: funded.atoms,
-		FeeAtoms:   defaultReclaimFee,
+		FeeAtoms:   r.reclaimFee,
 		Branch:     forfeit.Branch{Match: hex.EncodeToString(matchID[:]), Seat: seats[mine]},
 		Punisher:   punisher,
 		Params:     r.params,

@@ -17,9 +17,10 @@ import (
 	"github.com/karamble/dcrgaming-sdk/pkg/membership"
 )
 
-// defaultReclaimFee is what a reclaim pays when the bridge names no fee. These
-// spends are one input and one output, so it is generous rather than tight.
-const defaultReclaimFee = 10_000
+// DefaultReclaimFee is what a reclaim, a sweep and a release pay when neither
+// the bridge nor the game names a fee. These spends are one input and one
+// output, so it is generous rather than tight.
+const DefaultReclaimFee = 10_000
 
 // claim is one thing that can be pulled home: an output, the script it was paid
 // into, the key that opens it, and how long its lock is.
@@ -246,7 +247,7 @@ func (r *Runtime) pullHome(ctx context.Context, c claim, dest string, feeAtoms i
 		return "", err
 	}
 	if feeAtoms <= 0 {
-		feeAtoms = defaultReclaimFee
+		feeAtoms = r.reclaimFee
 	}
 	prevHash, err := chainhash.NewHashFromStr(txid)
 	if err != nil {

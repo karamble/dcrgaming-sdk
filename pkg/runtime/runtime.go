@@ -51,6 +51,22 @@ type Config struct {
 	// announcements. Frozen like SeatTags, and the game's to state.
 	// Optional: a game with no forfeitable bonds needs none.
 	PunishTag []byte
+	// AccuseFeeAtoms is what one rung of an accusation chain pays, for a
+	// table whose Terms do not state it.
+	//
+	// Terms win where they say anything, because a fee both seats agreed is
+	// stronger than one they each read from their own build. This exists for
+	// dcrpoker, whose live tables predate the term and whose digest cannot
+	// move to add it. Zero on both is refused rather than defaulted: a chain
+	// built at a fee nobody chose has an attrition bound that is a guess.
+	AccuseFeeAtoms uint64
+	// ReclaimFeeAtoms is what a reclaim, a sweep and a release pay. Zero
+	// means DefaultReclaimFee.
+	//
+	// A fee is an economic choice, the same reason the ladder's is a
+	// parameter: dcrpoker has always paid 20,000 and adopting somebody
+	// else's number would silently change bytes that move its money.
+	ReclaimFeeAtoms int64
 	// SeatTags are the game's own domain-separation tags for those keys.
 	// Required, and the game's to state: they are frozen hash inputs that
 	// decide which keys a seat has, so the SDK must not invent them.
@@ -64,15 +80,17 @@ type Config struct {
 //
 // A game hands it [Rules] and calls [Game] methods; it never drives.
 type Runtime struct {
-	rules     Rules
-	bridge    *transport.Bridge
-	book      *spend.Book
-	identity  *identity.Identity
-	seatTags  identity.SeatTags
-	params    stdaddr.AddressParams
-	punishTag []byte
-	router    *transport.Router
-	log       slog.Logger
+	rules      Rules
+	bridge     *transport.Bridge
+	book       *spend.Book
+	identity   *identity.Identity
+	seatTags   identity.SeatTags
+	params     stdaddr.AddressParams
+	punishTag  []byte
+	accuseFee  uint64
+	reclaimFee int64
+	router     *transport.Router
+	log        slog.Logger
 
 	// sweepMu guards what this process has broadcast a spend of. Its own
 	// lock because it is consulted from the reclaim path while the table
@@ -159,13 +177,18 @@ func New(cfg Config) (*Runtime, error) {
 	if log == nil {
 		log = slog.Disabled
 	}
+	reclaimFee := cfg.ReclaimFeeAtoms
+	if reclaimFee <= 0 {
+		reclaimFee = DefaultReclaimFee
+	}
 	r := &Runtime{
 		rules: cfg.Rules, bridge: cfg.Bridge, book: cfg.Book, log: log,
 		identity: cfg.Identity, seatTags: cfg.SeatTags, params: cfg.Params,
-		punishTag: cfg.PunishTag,
-		tables:    map[string]*table{},
-		names:     map[string]string{},
-		runCtx:    context.Background(),
+		punishTag: cfg.PunishTag, accuseFee: cfg.AccuseFeeAtoms,
+		reclaimFee: reclaimFee,
+		tables:     map[string]*table{},
+		names:      map[string]string{},
+		runCtx:     context.Background(),
 	}
 	// Built here rather than when Run starts, so a game that acts before the
 	// loop is up finds a router instead of a race.

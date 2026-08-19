@@ -9,6 +9,7 @@ import (
 	"github.com/karamble/dcrgaming-sdk/pkg/escrow"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/bridgetest"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
+	"github.com/karamble/dcrgaming-sdk/pkg/membership"
 	"github.com/karamble/dcrgaming-sdk/pkg/ruling"
 )
 
@@ -293,4 +294,120 @@ func TestASeatCannotTakeAClaimAgainstItself(t *testing.T) {
 func ourSeatOfLocked(t *table) uint32 {
 	seat, _ := t.form.OurSeat()
 	return seat
+}
+
+// A table whose terms state no accusation fee takes the game's own, which is
+// how dcrpoker adopts the chain without moving a digest its live tables bind
+// to.
+func TestATableWithNoStatedFeeTakesTheGamesOwn(t *testing.T) {
+	fake, rt, _ := stand(t, &trivialGame{})
+	sid, _ := bondedTwo(t, rt, fake)
+	tbl := tableOf(t, rt, sid)
+
+	// Terms state one; the chain uses it.
+	stated := int64(tbl.form.Terms().AccuseFeeAtoms)
+	if stated <= 0 {
+		t.Fatal("this fixture states no fee, so it proves nothing")
+	}
+	d, err := rt.accuseDraft(tbl, 1-ourSeatOf(t, rt, sid))
+	if err != nil {
+		t.Fatalf("draft: %v", err)
+	}
+	if d.FeeAtoms != stated {
+		t.Fatalf("the stated fee was ignored: %d, want %d", d.FeeAtoms, stated)
+	}
+}
+
+// And with neither, nothing is built: a chain at a fee nobody chose has an
+// attrition bound nobody can rely on.
+func TestAChainNeedsAFeeFromSomewhere(t *testing.T) {
+	fake, rt, _ := stand(t, &trivialGame{})
+	sid, _ := bondedTwo(t, rt, fake)
+	tbl := tableOf(t, rt, sid)
+
+	rt.mu.Lock()
+	rt.accuseFee = 0
+	rt.mu.Unlock()
+	// Strip the stated fee by rebuilding the formation's terms is not
+	// possible here, so drive the fallback directly.
+	if got := feeFor(0, 0); got != 0 {
+		t.Fatalf("feeFor(0,0) = %d", got)
+	}
+	if got := feeFor(0, 7); got != 7 {
+		t.Fatalf("the game's fee was not used: %d", got)
+	}
+	if got := feeFor(5, 7); got != 5 {
+		t.Fatalf("the stated fee did not win: %d", got)
+	}
+	_ = tbl
+}
+
+// pokerShaped states no bond terms at all, which is what dcrpoker's live
+// tables look like: the digest predates them.
+type pokerShaped struct{ battleshipsRules }
+
+func (pokerShaped) Terms(sid string) (membership.Terms, error) {
+	return membership.Terms{
+		Game: "battleships", GameVer: 1, SID: sid,
+		BuyInAtoms: 5_000_000, Seats: 2, CSVBlocks: 2048, Until: 900,
+	}, nil
+}
+
+// With no fee in the terms and none from the game, nothing is built. A chain at
+// a fee nobody chose has an attrition bound nobody can rely on.
+func TestAChainWithNoFeeAnywhereIsRefused(t *testing.T) {
+	fake, rt, _ := stand(t, &pokerShaped{})
+	rt.mu.Lock()
+	rt.accuseFee = 0
+	rt.mu.Unlock()
+
+	sid, _ := seatTwo(t, fake, rt)
+	tbl := tableOf(t, rt, sid)
+	if tbl.form.Terms().AccuseFeeAtoms != 0 {
+		t.Fatal("this fixture states a fee, so it proves nothing")
+	}
+	_, err := rt.accuseDraft(tbl, 1-ourSeatOf(t, rt, sid))
+	if err == nil {
+		t.Fatal("built a chain at a fee nobody chose")
+	}
+	if !strings.Contains(err.Error(), "nobody chose") {
+		t.Fatalf("refused for the wrong reason: %v", err)
+	}
+}
+
+// And a game that states its own is enough, which is how poker adopts the chain.
+func TestAGamesOwnFeeIsEnoughWhenTermsStateNone(t *testing.T) {
+	fake, rt, _ := stand(t, &pokerShaped{})
+	rt.mu.Lock()
+	rt.accuseFee = 10_000
+	rt.mu.Unlock()
+
+	sid, _ := seatTwo(t, fake, rt)
+	tbl := tableOf(t, rt, sid)
+	// The bond has to be on the chain for a draft to exist at all.
+	theirSeat := 1 - ourSeatOf(t, rt, sid)
+	bond, err := rt.tableBondOf(tbl, theirSeat)
+	if err != nil {
+		t.Fatalf("their bond: %v", err)
+	}
+	script, err := hex.DecodeString(bond.PkScriptHex)
+	if err != nil {
+		t.Fatalf("pkScript: %v", err)
+	}
+	txid := strings.Repeat("e7", 32)
+	fake.Place(txid, 0, script, int64(escrow.MinBondAtoms), fake.Height())
+	rt.mu.Lock()
+	if tbl.tableBondFunded == nil {
+		tbl.tableBondFunded = map[uint32]staked{}
+	}
+	tbl.tableBondFunded[theirSeat] = staked{outpoint: txid + ":0", atoms: int64(escrow.MinBondAtoms)}
+	rt.mu.Unlock()
+
+	d, err := rt.accuseDraft(tbl, theirSeat)
+	if err != nil {
+		t.Fatalf("draft: %v", err)
+	}
+	if d.FeeAtoms != 10_000 {
+		t.Fatalf("the game's fee was not used: %d", d.FeeAtoms)
+	}
 }

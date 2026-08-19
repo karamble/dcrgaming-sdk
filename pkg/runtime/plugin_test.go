@@ -73,6 +73,29 @@ var testTags = identity.SeatTags{
 	Bond:    "testgame/bond/v1",
 }
 
+// standWithReclaimFee builds a runtime with a given reclaim fee, for the fee
+// precedence tests.
+func standWithReclaimFee(t *testing.T, fee int64) *Runtime {
+	t.Helper()
+	book, err := spend.OpenBook(spend.MemStore())
+	if err != nil {
+		t.Fatalf("book: %v", err)
+	}
+	seed, err := identity.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	rt, err := New(Config{
+		Rules: &trivialGame{}, Bridge: &transport.Bridge{}, Book: book,
+		Identity: seed, SeatTags: testTags, Params: chaincfg.TestNet3Params(),
+		ReclaimFeeAtoms: fee,
+	})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	return rt
+}
+
 func TestARuntimeNeedsAGameABridgeAndSomewhereToWriteMoneyDown(t *testing.T) {
 	book, err := spend.OpenBook(spend.MemStore())
 	if err != nil {

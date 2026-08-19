@@ -147,7 +147,7 @@ func (r *Runtime) releaseDraft(t *table, seat uint32) (punish.Release, error) {
 	}
 	return punish.Release{
 		Bond: script, Prevout: prevout, ValueAtoms: funded.atoms,
-		OwnerPay: pay, FeeAtoms: defaultReclaimFee, Params: r.params,
+		OwnerPay: pay, FeeAtoms: r.reclaimFee, Params: r.params,
 	}, nil
 }
 
