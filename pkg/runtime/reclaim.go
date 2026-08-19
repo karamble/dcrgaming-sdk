@@ -51,14 +51,34 @@ func (r *Runtime) doReclaim(ctx context.Context, req *gamingpb.Reclaim) (string,
 	if err != nil {
 		return "", err
 	}
-	if req.GetKind() == gamingpb.Reclaim_BOND {
-		// The coin is already moving, so failing to write down that it
-		// left is worth saying and not worth failing over.
+	// The coin is already moving, so failing to write down that it left is
+	// worth saying and not worth failing over. Written down all the same,
+	// because what this peer still holds is what decides whether a table
+	// can be let go of.
+	switch req.GetKind() {
+	case gamingpb.Reclaim_BOND:
 		if err := r.identity.SetBondDeposit(""); err != nil {
 			r.log.Errorf("swept the bond as %s but could not forget it: %v", txid, err)
 		}
+	case gamingpb.Reclaim_STAKE:
+		r.forgetOurs(req.GetSid(), func(t *table, seat uint32) { delete(t.funded, seat) })
+	case gamingpb.Reclaim_TABLE_BOND:
+		r.forgetOurs(req.GetSid(), func(t *table, seat uint32) { delete(t.tableBondFunded, seat) })
 	}
 	return txid, nil
+}
+
+// forgetOurs drops this seat's record of an output that has been pulled home.
+func (r *Runtime) forgetOurs(match string, drop func(*table, uint32)) {
+	t, seat, err := r.ourSeatAt(match)
+	if err != nil {
+		r.log.Errorf("table %s: swept a payment but could not forget it: %v", match, err)
+		return
+	}
+	r.mu.Lock()
+	drop(t, seat)
+	r.mu.Unlock()
+	r.keep(t)
 }
 
 // claimFor works out which output a reclaim request names.

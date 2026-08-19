@@ -520,3 +520,99 @@ func TestACommittedTableComesBackWithEverySeatsCommit(t *testing.T) {
 		t.Fatalf("the table came back %v, having been %v", after.form.State(), wantState)
 	}
 }
+
+// A table this peer still has coin at cannot be tidied away.
+//
+// Forgetting one does not lose the coin, but it loses the only thing that
+// knows how to reach it: which outpoint held the stake and which script it can
+// be spent back out of. The timelock is measured in days and this process is
+// not.
+func TestATableStillHoldingOurCoinCannotBeDropped(t *testing.T) {
+	dir, store := t.TempDir(), NewMemTableStore()
+	fake, rt := standAt(t, &trivialGame{}, dir, store)
+	sid, _ := seatTwo(t, fake, rt)
+	tbl, err := rt.tableOf(sid)
+	if err != nil {
+		t.Fatalf("table: %v", err)
+	}
+	mine, ok := tbl.form.OurSeat()
+	if !ok {
+		t.Fatal("not seated")
+	}
+
+	for _, tc := range []struct {
+		what string
+		put  func()
+		take func()
+	}{
+		{"a stake",
+			func() { tbl.funded = map[uint32]staked{mine: {outpoint: bondOutpoint, atoms: 5_000_000}} },
+			func() { tbl.funded = map[uint32]staked{} }},
+		{"a table bond",
+			func() {
+				tbl.tableBondFunded = map[uint32]staked{mine: {outpoint: bondOutpoint, atoms: 2_000_000}}
+			},
+			func() { tbl.tableBondFunded = map[uint32]staked{} }},
+		{"a forfeitable bond",
+			func() {
+				tbl.forfeitFunded = map[uint32]staked{mine: {outpoint: bondOutpoint, atoms: 2_000_000}}
+			},
+			func() { tbl.forfeitFunded = map[uint32]staked{} }},
+	} {
+		rt.mu.Lock()
+		tc.put()
+		rt.mu.Unlock()
+		if !rt.HoldsOurs(sid) {
+			t.Fatalf("%s: the table says it holds nothing of ours", tc.what)
+		}
+		if err := rt.Drop(sid); err == nil {
+			t.Fatalf("%s: the table was dropped with our coin still at it", tc.what)
+		}
+		if _, err := rt.tableOf(sid); err != nil {
+			t.Fatalf("%s: the table went anyway: %v", tc.what, err)
+		}
+		rt.mu.Lock()
+		tc.take()
+		rt.mu.Unlock()
+	}
+
+	// With nothing left at it, it goes - from memory and from the disk.
+	if rt.HoldsOurs(sid) {
+		t.Fatal("the table still claims to hold something")
+	}
+	if err := rt.Drop(sid); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	if _, err := rt.tableOf(sid); err == nil {
+		t.Fatal("the table is still in memory")
+	}
+	recs, err := store.LoadTables()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	for _, rec := range recs {
+		if rec.Match == sid {
+			t.Fatal("the table is still on disk, and would come back on the next restart")
+		}
+	}
+}
+
+// Another seat's coin is not ours to wait on. A table where only they are
+// still in can be let go of.
+func TestAnotherSeatsCoinDoesNotHoldTheTable(t *testing.T) {
+	dir, store := t.TempDir(), NewMemTableStore()
+	fake, rt := standAt(t, &trivialGame{}, dir, store)
+	sid, _ := seatTwo(t, fake, rt)
+	tbl, _ := rt.tableOf(sid)
+	mine, _ := tbl.form.OurSeat()
+
+	rt.mu.Lock()
+	tbl.funded = map[uint32]staked{1 - mine: {outpoint: bondOutpoint, atoms: 5_000_000}}
+	rt.mu.Unlock()
+	if rt.HoldsOurs(sid) {
+		t.Fatal("somebody else's stake was counted as ours")
+	}
+	if err := rt.Drop(sid); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+}

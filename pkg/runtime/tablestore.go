@@ -500,3 +500,56 @@ func (f *FileTableStore) DropTable(match string) error {
 	}
 	return nil
 }
+
+// Getting up from a table is the game's message, not this one's.
+//
+// A seat saying it is leaving carries the point in the game it is leaving at,
+// and its signature is checked against the game's own log - so the runtime has
+// neither the vocabulary to write one nor the standing to check one, and
+// claiming the message would only swallow the game's traffic.
+//
+// What is the runtime's is the money: whether anything is still owed at a
+// table, and therefore whether the table may be let go of at all.
+
+// HoldsOurs reports whether this peer still has coin at a table that nothing
+// has taken back out.
+//
+// It is what stands between a table being tidied away and a timelocked stake
+// outliving every record of where it is. The lock is measured in days and this
+// process is not.
+func (r *Runtime) HoldsOurs(match string) bool {
+	t, seat, err := r.ourSeatAt(match)
+	if err != nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, held := range []map[uint32]staked{t.funded, t.tableBondFunded, t.forfeitFunded} {
+		if held[seat].outpoint != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// Drop forgets a table, on disk and in memory.
+//
+// Refused while this peer still has coin at it. A table is the only record of
+// which outpoint held this seat's stake and which script it can be spent back
+// out of; forgetting one that still holds coin does not lose the coin, but it
+// does lose the only thing that knows how to reach it.
+func (r *Runtime) Drop(match string) error {
+	if r.HoldsOurs(match) {
+		return fmt.Errorf(
+			"table %s still holds coin of ours; settle or reclaim it before letting the table go", match)
+	}
+	r.mu.Lock()
+	_, ok := r.tables[match]
+	delete(r.tables, match)
+	r.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("no table %q", match)
+	}
+	r.forget(match)
+	return nil
+}
