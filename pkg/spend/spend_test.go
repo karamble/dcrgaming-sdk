@@ -2,9 +2,12 @@ package spend
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
 
 	"google.golang.org/grpc/codes"
@@ -391,6 +394,77 @@ func TestTheStateMachineRules(t *testing.T) {
 		}
 		if !tc.ok && err == nil {
 			t.Errorf("%s -> %s was allowed", tc.from, tc.to)
+		}
+	}
+}
+
+// Two writers on one file do not interleave into one record.
+//
+// A restarted daemon can overlap its predecessor on the same directory for a
+// moment. With one fixed temporary name they write into the same file and
+// rename it in turn, and what lands is half of each - a money record that
+// describes neither process's idea of what is owed.
+func TestTwoWritersDoNotInterleaveTheMoneyFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "spends.json")
+	one, err := FileStore(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	two, err := FileStore(path)
+	if err != nil {
+		t.Fatalf("open again: %v", err)
+	}
+
+	// Different sizes, so a half-written file is not accidentally valid.
+	small := []Record{{ID: "a", Match: "m", Purpose: "stake", Address: "Ts", Atoms: 1}}
+	big := make([]Record, 0, 200)
+	for i := range 200 {
+		big = append(big, Record{
+			ID: fmt.Sprintf("b%d", i), Match: "m", Purpose: "stake",
+			Address: strings.Repeat("T", 64), Atoms: int64(i),
+		})
+	}
+
+	var wg sync.WaitGroup
+	var failed sync.Map
+	save := func(st Store, rs []Record, who string) {
+		defer wg.Done()
+		if err := st.Save(rs); err != nil {
+			failed.Store(who, err)
+		}
+	}
+	for range 40 {
+		wg.Add(2)
+		go save(one, small, "one")
+		go save(two, big, "two")
+	}
+	wg.Wait()
+
+	// Nobody's write failed. With one temporary name shared between them,
+	// each writer's cleanup deletes the file the other is about to rename.
+	failed.Range(func(who, err any) bool {
+		t.Errorf("writer %v could not save: %v", who, err)
+		return true
+	})
+
+	// Whatever landed has to be one of the two, whole.
+	back, err := FileStore(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	got, err := back.Load()
+	if err != nil {
+		t.Fatalf("the money file is unreadable after concurrent writes: %v", err)
+	}
+	if len(got) != len(small) && len(got) != len(big) {
+		t.Fatalf("the file holds %d records, which is neither writer's %d nor %d",
+			len(got), len(small), len(big))
+	}
+	// And no temporary files left behind.
+	entries, _ := os.ReadDir(filepath.Dir(path))
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp-") {
+			t.Errorf("a temporary file was left behind: %s", e.Name())
 		}
 	}
 }

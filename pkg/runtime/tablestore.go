@@ -476,13 +476,27 @@ func (f *FileTableStore) SaveTable(rec TableRecord) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, blob, 0o600); err != nil {
+	// Renamed into place, so a run that stops mid-write finds the previous
+	// table rather than half of this one - and under a name nothing else
+	// will pick, because a restarted daemon can overlap its predecessor on
+	// one directory and two writers sharing a temporary name interleave.
+	tmp, err := os.CreateTemp(f.dir, rec.Match+".tmp-")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(blob); err != nil {
+		tmp.Close()
 		return fmt.Errorf("write the table: %w", err)
 	}
-	// Renamed into place, so a run that stops mid-write finds the previous
-	// table rather than half of this one.
-	if err := os.Rename(tmp, path); err != nil {
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
 		return fmt.Errorf("write the table: %w", err)
 	}
 	return nil

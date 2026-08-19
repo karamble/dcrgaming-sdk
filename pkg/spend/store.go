@@ -64,11 +64,33 @@ func (s *fileStore) Save(rs []Record) error {
 	if err != nil {
 		return err
 	}
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, out, 0o600); err != nil {
+	return writeAtomic(s.path, out)
+}
+
+// writeAtomic writes a whole file by renaming a new one over it.
+//
+// The temporary name is unique rather than fixed. A restarted daemon can
+// overlap its predecessor on the same directory for a moment, and two writers
+// sharing one temporary name interleave into a single file - which is a money
+// record with half of each process's idea of it in.
+func writeAtomic(path string, body []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	defer os.Remove(tmp.Name())
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(body); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 // MemStore keeps a book in memory. For tests, and for a game that has genuinely
