@@ -164,6 +164,9 @@ func (r *Runtime) landDeposit(ctx context.Context, t *table, seat uint32, rec sp
 	}
 	t.funded[seat] = out
 	r.mu.Unlock()
+	// Where a stake landed is the one fact a restart cannot rediscover:
+	// nothing on the chain says which outpoint was this table's.
+	r.keep(t)
 	return nil
 }
 
@@ -200,15 +203,19 @@ func (r *Runtime) SetPayoutFor(match string, seat uint32, payScript []byte) erro
 		return fmt.Errorf("seat %d named no payout script", seat)
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	t, ok := r.tables[match]
 	if !ok {
+		r.mu.Unlock()
 		return fmt.Errorf("no table %q", match)
 	}
 	if t.payouts == nil {
 		t.payouts = map[uint32][]byte{}
 	}
 	t.payouts[seat] = append([]byte(nil), payScript...)
+	r.mu.Unlock()
+	// Every seat announces this once and it goes into the settlement they
+	// all sign, so a restart that lost it cannot settle the table.
+	r.keep(t)
 	return nil
 }
 

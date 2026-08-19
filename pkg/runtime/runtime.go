@@ -71,6 +71,11 @@ type Config struct {
 	// Required, and the game's to state: they are frozen hash inputs that
 	// decide which keys a seat has, so the SDK must not invent them.
 	SeatTags identity.SeatTags
+	// Tables is where tables are kept between runs. Optional, and a game
+	// that leaves it out keeps its tables in memory only - which means a
+	// restart forgets every stake it has not yet settled and every bond it
+	// has not yet released.
+	Tables TableStore
 	// Log is optional.
 	Log slog.Logger
 }
@@ -102,8 +107,17 @@ type Runtime struct {
 	// carries the same lifetime as the loop that fetched it.
 	runCtx context.Context
 
+	// store is where tables are kept between runs. Optional.
+	store TableStore
+
 	mu     sync.Mutex
 	tables map[string]*table
+	// ended is every table that finished aborted, and why. A tombstone
+	// rather than a table: the state is terminal and has to stay terminal
+	// across a restart, because a commit arriving after everyone else gave
+	// up would otherwise put this process back into a membership nobody is
+	// bound to.
+	ended  map[string]string
 	payout string
 	names  map[string]string
 }
@@ -186,7 +200,9 @@ func New(cfg Config) (*Runtime, error) {
 		identity: cfg.Identity, seatTags: cfg.SeatTags, params: cfg.Params,
 		punishTag: cfg.PunishTag, accuseFee: cfg.AccuseFeeAtoms,
 		reclaimFee: reclaimFee,
+		store:      cfg.Tables,
 		tables:     map[string]*table{},
+		ended:      map[string]string{},
 		names:      map[string]string{},
 		runCtx:     context.Background(),
 	}

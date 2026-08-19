@@ -143,6 +143,9 @@ func (r *Runtime) adoptPunishKey(ctx context.Context, match string, n membership
 	ready := len(t.punishPubs) == len(seats)
 	r.mu.Unlock()
 
+	// An announcement arrives once. Without it a resumed table cannot
+	// rebuild the bond that names it, so nothing could be punished.
+	r.keep(t)
 	if ready {
 		return r.buildForfeitableBonds(t)
 	}
@@ -252,6 +255,7 @@ func (r *Runtime) FundForfeitBond(ctx context.Context, match string) error {
 	}
 	t.forfeitFunded[mine] = out
 	r.mu.Unlock()
+	r.keep(t)
 	return nil
 }
 
@@ -282,14 +286,18 @@ func (r *Runtime) NoteForfeitBond(ctx context.Context, match string, seat uint32
 			"nothing was recorded and no sweep will point at it", outpoint, seat)
 	}
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	t := r.tables[match]
 	if t == nil {
+		r.mu.Unlock()
 		return fmt.Errorf("no table %q", match)
 	}
 	if t.forfeitFunded == nil {
 		t.forfeitFunded = map[uint32]staked{}
 	}
 	t.forfeitFunded[seat] = staked{outpoint: outpoint, atoms: out.ValueAtoms}
+	r.mu.Unlock()
+	// Somebody else's payment, which this peer never saw go out and could
+	// not find again on its own.
+	r.keep(t)
 	return nil
 }

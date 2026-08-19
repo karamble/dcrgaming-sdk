@@ -77,15 +77,21 @@ func (r *Runtime) acceptInvite(ctx context.Context, req *gamingpb.AcceptInvite) 
 	}
 
 	r.mu.Lock()
+	if why, over := r.ended[inv.SID]; over {
+		r.mu.Unlock()
+		return "", fmt.Errorf("this session already ended: %s", why)
+	}
 	if _, seen := r.tables[inv.SID]; seen {
 		r.mu.Unlock()
 		// Accepting twice is not an error. An operator pressing the
 		// button again, or a retried request, gets the same answer.
 		return inv.SID, nil
 	}
-	r.tables[inv.SID] = &table{match: inv.SID, gcID: gcid, form: form}
+	t := &table{match: inv.SID, gcID: gcid, form: form}
+	r.tables[inv.SID] = t
 	r.mu.Unlock()
 
+	r.keep(t)
 	if err := r.publishJoin(ctx, inv.SID); err != nil {
 		return "", err
 	}
@@ -220,23 +226,38 @@ func (t *table) gCID() string { return t.gcID }
 // addJoin takes another seat's claim to the table.
 func (r *Runtime) addJoin(match string, j *membership.Join) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	t, ok := r.tables[match]
 	if !ok {
+		r.mu.Unlock()
 		return fmt.Errorf("a join arrived for a table this game is not at")
 	}
-	return t.form.AddJoin(j)
+	err := t.form.AddJoin(j)
+	r.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	// A join nobody will send twice decides the seating, so it is written
+	// down as soon as it is taken. Outside the lock, because writing it
+	// calls the game.
+	r.keep(t)
+	return nil
 }
 
 // addCommit takes another seat's commitment to the roster.
 func (r *Runtime) addCommit(match string, c *membership.Commit) error {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	t, ok := r.tables[match]
 	if !ok {
+		r.mu.Unlock()
 		return fmt.Errorf("a commit arrived for a table this game is not at")
 	}
-	return t.form.AddCommit(c)
+	err := t.form.AddCommit(c)
+	r.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	r.keep(t)
+	return nil
 }
 
 // seatIfReady sets the beacon once the chain has reached its height, which is
@@ -285,6 +306,9 @@ func (r *Runtime) seatIfReady(ctx context.Context, match string) error {
 	r.mu.Lock()
 	t.seats = seats
 	r.mu.Unlock()
+	// The beacon is what turns an agreed roster into seats, so a restart
+	// that lost it would seat this table differently from everyone else.
+	r.keep(t)
 
 	// Announce before the game is told, so a game that starts play on Seated
 	// finds the exchange already under way.

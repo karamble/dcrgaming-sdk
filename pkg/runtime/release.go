@@ -55,6 +55,7 @@ func (r *Runtime) FundTableBond(ctx context.Context, match string) error {
 	}
 	t.tableBondFunded[mine] = out
 	r.mu.Unlock()
+	r.keep(t)
 	return nil
 }
 
