@@ -286,6 +286,13 @@ func (r *Runtime) seatIfReady(ctx context.Context, match string) error {
 	t.seats = seats
 	r.mu.Unlock()
 
+	// Announce before the game is told, so a game that starts play on Seated
+	// finds the exchange already under way.
+	if len(r.punishTag) > 0 {
+		if err := r.announcePunishKey(ctx, match); err != nil {
+			r.log.Warnf("table %s: announcing a punishment key: %v", match, err)
+		}
+	}
 	if h, ok := r.rules.(Seated); ok {
 		h.Seated(ctx, match, seats)
 	}

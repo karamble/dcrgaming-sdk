@@ -58,6 +58,7 @@ func stand(t *testing.T, g Rules) (*bridgetest.Bridge, *Runtime, context.CancelF
 	rt, err := New(Config{
 		Rules: g, Bridge: conn, Book: book,
 		Identity: seed, SeatTags: testTags, Params: chaincfg.TestNet3Params(),
+		PunishTag: []byte("testgame/punishkey/v1"),
 	})
 	if err != nil {
 		t.Fatalf("new: %v", err)

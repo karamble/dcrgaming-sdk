@@ -2,12 +2,17 @@ package runtime
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
+
+	"github.com/karamble/dcrgaming-sdk/pkg/forfeit"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/gamingpb"
+	"github.com/karamble/dcrgaming-sdk/pkg/punish"
 	"github.com/karamble/dcrgaming-sdk/pkg/ruling"
 )
 
@@ -177,17 +182,112 @@ func (r *Runtime) gameState(ctx context.Context) (st *gamingpb.GameState) {
 // a bond to be swept by asserting that someone cheated. A silence ruling is
 // taken at the game's word, because the ladder gives the accused an on-chain
 // right of reply and the SDK has no vocabulary for what was owed.
-//
-// The mechanism itself is pkg/punish and pkg/evidence. What is still missing is
-// the table's forfeitable-bond records, which arrive with the funding stage.
-func (r *Runtime) Forfeit(_ context.Context, rl ruling.Ruling) error {
+func (r *Runtime) Forfeit(ctx context.Context, rl ruling.Ruling) error {
 	if err := rl.Validate(); err != nil {
 		return err
 	}
-	if rl.Kind == ruling.Equivocation {
-		if _, err := rl.Equivocated.Recover(); err != nil {
+	switch rl.Kind {
+	case ruling.Equivocation:
+		recovered, err := rl.Equivocated.Recover()
+		if err != nil {
 			return fmt.Errorf("this equivocation exposes no key, so no bond may be swept: %w", err)
 		}
+		return r.sweepForfeited(ctx, rl, recovered)
+	case ruling.Silence:
+		// The ladder is pre-signed at bonding and run rung by rung, which
+		// is an exchange this runtime does not carry out yet.
+		return fmt.Errorf("running the claim ladder: %w", ErrNotYet)
+	case ruling.Clean:
+		return fmt.Errorf("releasing a bond cooperatively: %w", ErrNotYet)
 	}
-	return fmt.Errorf("forfeiting: %w", ErrNotYet)
+	return fmt.Errorf("this runtime does not know how to carry out a %s ruling", rl.Kind)
+}
+
+// sweepForfeited takes the accused's forfeitable bond to the seat it lied to.
+//
+// The bond is spent with two halves of one key: the half the equivocation
+// published, and the half only the wronged seat holds. Neither alone opens it,
+// which is what makes the punishment self-executing rather than something
+// anybody has to be trusted to carry out.
+func (r *Runtime) sweepForfeited(ctx context.Context, rl ruling.Ruling, recovered *secp256k1.PrivateKey) error {
+	r.mu.Lock()
+	t, ok := r.tables[rl.Match]
+	r.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("no table %q", rl.Match)
+	}
+	bond, ok := r.ForfeitableBond(rl.Match, rl.Against)
+	if !ok {
+		return fmt.Errorf("seat %d has no forfeitable bond; every seat has to announce first", rl.Against)
+	}
+	r.mu.Lock()
+	funded, isFunded := t.forfeitFunded[rl.Against]
+	punisher := t.punish
+	r.mu.Unlock()
+	if !isFunded || funded.outpoint == "" {
+		return fmt.Errorf("seat %d's forfeitable bond is not on the chain, so there is nothing to take", rl.Against)
+	}
+	if punisher == nil {
+		return fmt.Errorf("this seat holds no punishment key for that table")
+	}
+	if r.isSweeping(funded.outpoint) {
+		return fmt.Errorf("a spend of %s is already on its way from this process; "+
+			"asking again would be a double spend", funded.outpoint)
+	}
+
+	mine, ok := t.form.OurSeat()
+	if !ok {
+		return fmt.Errorf("this table has not seated us")
+	}
+	seats, _ := t.form.Seats()
+	matchID, ok := t.form.RosterHash()
+	if !ok {
+		return fmt.Errorf("this table has no settled roster")
+	}
+	script, err := hex.DecodeString(bond.ScriptHex)
+	if err != nil || len(script) == 0 {
+		return fmt.Errorf("seat %d's forfeitable bond has no script", rl.Against)
+	}
+	prevout, err := outpointOf(funded.outpoint)
+	if err != nil {
+		return err
+	}
+	pinned, err := r.pinnedPayout()
+	if err != nil {
+		return err
+	}
+
+	tx, err := punish.SweepForfeited(recovered, pinned, punish.Sweep{
+		Bond:       script,
+		Prevout:    prevout,
+		ValueAtoms: funded.atoms,
+		FeeAtoms:   defaultReclaimFee,
+		Branch:     forfeit.Branch{Match: hex.EncodeToString(matchID[:]), Seat: seats[mine]},
+		Punisher:   punisher,
+		Params:     r.params,
+	})
+	if err != nil {
+		return fmt.Errorf("build the sweep: %w", err)
+	}
+	raw, err := tx.Bytes()
+	if err != nil {
+		return err
+	}
+	txid, err := r.bridge.Broadcast(ctx, hex.EncodeToString(raw))
+	if err != nil {
+		return fmt.Errorf("send the sweep: %w", err)
+	}
+	r.noteSweeping(funded.outpoint)
+	r.log.Infof("table %s: took seat %d's forfeitable bond in %s", rl.Match, rl.Against, txid)
+	return nil
+}
+
+// pinnedPayout is where a punishment spend has to pay, and the only place it
+// may. Without one there is nothing holding the spend to this operator.
+func (r *Runtime) pinnedPayout() ([]byte, error) {
+	addr := r.Payout()
+	if addr == "" {
+		return nil, fmt.Errorf("no payout address has been set, so a punishment spend has nowhere it is allowed to go")
+	}
+	return payScriptFor(addr, r.params)
 }
