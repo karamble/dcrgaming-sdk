@@ -116,12 +116,12 @@ func TestDivergentCellAttestationsSweepTheBond(t *testing.T) {
 	if recovered == nil {
 		t.Fatal("a divergent pair recovered nothing")
 	}
-	if !recovered.PubKey().IsEqual(f.logPriv.PubKey()) {
+	if !recovered.Key().PubKey().IsEqual(f.logPriv.PubKey()) {
 		t.Fatal("the recovered key is not the cheat's log key")
 	}
 
 	pinned := pinnedScript()
-	final, err := SweepForfeited(recovered, pinned, sweepDraft(f))
+	final, err := SweepForfeited(recovered.Key(), pinned, sweepDraft(f))
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}

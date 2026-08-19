@@ -1022,10 +1022,10 @@ func TestBothSeatsGetTheirTableBondBack(t *testing.T) {
 	})
 
 	// Both at once, which is what the end of a table looks like.
-	if err := one.releaseTableBond(ctx, sid); err != nil {
+	if err := one.Release(ctx, sid); err != nil {
 		t.Fatalf("first seat releasing: %v", err)
 	}
-	if err := two.releaseTableBond(ctx, sid); err != nil {
+	if err := two.Release(ctx, sid); err != nil {
 		t.Fatalf("second seat releasing: %v", err)
 	}
 

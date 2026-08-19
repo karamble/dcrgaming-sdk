@@ -110,7 +110,7 @@ func TestRecordDivergenceRecoversKey(t *testing.T) {
 	if k == nil {
 		t.Fatal("a divergent second half returned no key")
 	}
-	if !k.PubKey().IsEqual(pub) {
+	if !k.Key().PubKey().IsEqual(pub) {
 		t.Fatal("the recovered key is not the signer's")
 	}
 	if got := s.Retained(pub, pos); len(got) != 2 {
@@ -158,7 +158,7 @@ func TestSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second half after restart: %v", err)
 	}
-	if k == nil || !k.PubKey().IsEqual(pub) {
+	if k == nil || !k.Key().PubKey().IsEqual(pub) {
 		t.Fatal("the proof did not survive the restart")
 	}
 
@@ -209,7 +209,7 @@ func TestChainHalfTriggerSurfacesRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("chain trigger after the pair: %v", err)
 	}
-	if k == nil || !k.PubKey().IsEqual(pub) {
+	if k == nil || !k.Key().PubKey().IsEqual(pub) {
 		t.Fatal("the chain trigger did not surface the wire recovery")
 	}
 }

@@ -297,6 +297,60 @@ func (l *ladder) finish(bond []byte, params stdaddr.AddressParams) error {
 	return nil
 }
 
+// Lapsed is a duty a seat owed and did not do, in the game's own words.
+//
+// The runtime never interprets Duty: what counts as owed is the game's to say,
+// and a label it does not understand is one it cannot get wrong. It carries
+// both Duty and Seq into the log so a person reading an accusation can tell
+// what was owed, and it acts on By alone.
+type Lapsed struct {
+	// Duty is what was owed, named however the game names it.
+	Duty string
+	// Seq is where in the game's own ordering it was owed.
+	Seq uint64
+	// By is the chain height the duty lapsed at.
+	By uint32
+}
+
+// Accuse opens the accusation chain against a seat that has stopped answering.
+//
+// Silence is not proof of anything on its own - a peer can be offline rather
+// than lying - so this takes nothing. It spends the accused's table bond into a
+// claim they can answer for the cost of one fee, and it is the answer or the
+// lack of it that decides where the money goes.
+//
+// The game decides what was owed; the chain decides whether it is late.
+func (r *Runtime) Accuse(ctx context.Context, match string, seat uint32, lapsed Lapsed) error {
+	if lapsed.Duty == "" {
+		return fmt.Errorf("an accusation has to say what was owed")
+	}
+	if lapsed.By == 0 {
+		// Not pedantry. An unset By is zero, every height is at or past
+		// zero, and the gate below would wave it through - so a caller
+		// that forgot this field would spend the accused's bond with no
+		// stated lapse at all. Refused here rather than defaulted,
+		// because there is no safe height to guess.
+		return fmt.Errorf("an accusation has to say what height the duty lapsed at")
+	}
+	// The height the game says the duty lapsed at has to have passed. Not
+	// politeness: an accusation spends the accused's bond into a claim they
+	// have a window to answer, so one opened early is a window that closes
+	// before they could have known they owed anything.
+	tip, err := r.bridge.ChainTip(ctx)
+	if err != nil {
+		return fmt.Errorf("read the tip before accusing: %w", err)
+	}
+	if by := int64(lapsed.By); tip.Height < by {
+		return fmt.Errorf(
+			"this ruling says the duty lapsed at height %d and the chain is at %d; "+
+				"accusing now would spend a bond the accused has not yet had a chance to defend",
+			by, tip.Height)
+	}
+	r.log.Infof("table %s: seat %d owed %s/%d by height %d",
+		match, seat, lapsed.Duty, lapsed.Seq, lapsed.By)
+	return r.runLadder(ctx, match, seat)
+}
+
 // RunLadder broadcasts the next accusation against a seat that has stopped
 // answering.
 //

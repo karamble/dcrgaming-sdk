@@ -43,6 +43,26 @@ const (
 	sigLen    = forfeit.SigLen // 64: an off-chain position-signed attestation
 )
 
+// Exposed is a key an equivocation gave up, together with the fact that this
+// store is holding what gave it up.
+//
+// The field is unexported, so the only way to come by one is to be handed it
+// here - which means the two signatures that solved for it are on disk before
+// anything is spent against it. That is the whole of what it buys: an audit
+// trail that outlives the moment. It is not a barrier. Anyone already holding a
+// seat's log key can record a pair that recovers it, so this says the halves
+// were kept, never that the seat really cheated. What stops a fabricated key
+// from taking a bond is the escrow arithmetic, not this type.
+type Exposed struct{ priv *secp256k1.PrivateKey }
+
+// Key is the recovered private key.
+func (e *Exposed) Key() *secp256k1.PrivateKey {
+	if e == nil {
+		return nil
+	}
+	return e.priv
+}
+
 // Half is one retained signature: the digest that was signed and the signature
 // over it. Two halves at one position with different digests are a proof.
 type Half struct {
@@ -125,7 +145,7 @@ func Open(path string) (*Store, error) {
 // differs - the equivocation - is retained alongside the first, and the pair is
 // solved: the cheat's key is returned. Both halves are kept, so the key can be
 // re-derived after a restart.
-func (s *Store) Record(signer *secp256k1.PublicKey, pos forfeit.Position, digest [32]byte, sig []byte) (*secp256k1.PrivateKey, error) {
+func (s *Store) Record(signer *secp256k1.PublicKey, pos forfeit.Position, digest [32]byte, sig []byte) (*Exposed, error) {
 	if signer == nil {
 		return nil, fmt.Errorf("no signer")
 	}
@@ -171,7 +191,7 @@ func (s *Store) Record(signer *secp256k1.PublicKey, pos forfeit.Position, digest
 // evidence and it prompts a re-check - so if the store already holds a divergent
 // pair of wire signatures at this position, that recovery is surfaced now. This
 // is the seam the M6 chain watcher calls; recovery itself stays wire by wire.
-func (s *Store) Trigger(signer *secp256k1.PublicKey, pos forfeit.Position, chainSig []byte) (*secp256k1.PrivateKey, error) {
+func (s *Store) Trigger(signer *secp256k1.PublicKey, pos forfeit.Position, chainSig []byte) (*Exposed, error) {
 	if signer == nil {
 		return nil, fmt.Errorf("no signer")
 	}
@@ -235,7 +255,7 @@ func (s *Store) Retained(signer *secp256k1.PublicKey, pos forfeit.Position) []Ha
 
 // recoverFromWire returns the key from the first divergent pair of wire halves,
 // or nil if no two of them prove an equivocation yet.
-func recoverFromWire(signer *secp256k1.PublicKey, wire []halfJSON) (*secp256k1.PrivateKey, error) {
+func recoverFromWire(signer *secp256k1.PublicKey, wire []halfJSON) (*Exposed, error) {
 	for i := 0; i < len(wire); i++ {
 		di, si, err := wire[i].bytes()
 		if err != nil {
@@ -253,7 +273,7 @@ func recoverFromWire(signer *secp256k1.PublicKey, wire []halfJSON) (*secp256k1.P
 			if err != nil {
 				continue // not a recovering pair; keep looking
 			}
-			return priv, nil
+			return &Exposed{priv: priv}, nil
 		}
 	}
 	return nil, nil

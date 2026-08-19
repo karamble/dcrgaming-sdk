@@ -10,6 +10,7 @@ import (
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 
+	"github.com/karamble/dcrgaming-sdk/pkg/evidence"
 	"github.com/karamble/dcrgaming-sdk/pkg/forfeit"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/gamingpb"
 	"github.com/karamble/dcrgaming-sdk/pkg/punish"
@@ -207,11 +208,9 @@ func (r *Runtime) gameState(ctx context.Context) (st *gamingpb.GameState) {
 
 // Forfeit carries out a ruling the game has made.
 //
-// An equivocation ruling is checked here before anything is spent - the key
-// either falls out of the two signatures or it does not, so a game cannot cause
-// a bond to be swept by asserting that someone cheated. A silence ruling is
-// taken at the game's word, because the ladder gives the accused an on-chain
-// right of reply and the SDK has no vocabulary for what was owed.
+// Kept only so a game still on the ruling shape keeps working; it is a thin
+// translation into the verbs below and is going away. New code calls Seize,
+// Accuse or Release directly.
 func (r *Runtime) Forfeit(ctx context.Context, rl ruling.Ruling) error {
 	if err := rl.Validate(); err != nil {
 		return err
@@ -222,54 +221,80 @@ func (r *Runtime) Forfeit(ctx context.Context, rl ruling.Ruling) error {
 		if err != nil {
 			return fmt.Errorf("this equivocation exposes no key, so no bond may be swept: %w", err)
 		}
-		return r.sweepForfeited(ctx, rl, recovered)
+		return r.seize(ctx, rl.Match, rl.Against, recovered)
 	case ruling.Silence:
-		// The height the game says the duty lapsed at has to have
-		// passed. Not politeness: an accusation spends the accused's
-		// bond into a claim they have a window to answer, so one opened
-		// early is a window that closes before they could have known
-		// they owed anything. The game decides what was owed; the chain
-		// decides whether it is late.
-		tip, err := r.bridge.ChainTip(ctx)
-		if err != nil {
-			return fmt.Errorf("read the tip before accusing: %w", err)
-		}
-		if by := int64(rl.Silent.By); tip.Height < by {
-			return fmt.Errorf(
-				"this ruling says the duty lapsed at height %d and the chain is at %d; "+
-					"accusing now would spend a bond the accused has not yet had a chance to defend",
-				by, tip.Height)
-		}
-		return r.runLadder(ctx, rl.Match, rl.Against)
+		return r.Accuse(ctx, rl.Match, rl.Against, Lapsed{
+			Duty: rl.Silent.Duty, Seq: rl.Silent.Seq, By: rl.Silent.By,
+		})
 	case ruling.Clean:
-		return r.releaseTableBond(ctx, rl.Match)
+		return r.Release(ctx, rl.Match)
 	}
 	return fmt.Errorf("this runtime does not know how to carry out a %s ruling", rl.Kind)
 }
 
-// sweepForfeited takes the accused's forfeitable bond to the seat it lied to.
+// Seize takes a seat's forfeitable bond, using the key its own signatures gave
+// up.
 //
 // The bond is spent with two halves of one key: the half the equivocation
-// published, and the half only the wronged seat holds. Neither alone opens it,
-// which is what makes the punishment self-executing rather than something
-// anybody has to be trusted to carry out.
-func (r *Runtime) sweepForfeited(ctx context.Context, rl ruling.Ruling, recovered *secp256k1.PrivateKey) error {
+// published, and the half only this seat holds. Neither alone opens it, which
+// is what makes the punishment self-executing rather than something anybody has
+// to be trusted to carry out.
+//
+// What authorises this is not the game's word and not the shape of any proof.
+// It is escrow arithmetic, and it holds because of three things this runtime
+// guarantees and escrow.ForfeitIndex explicitly does not:
+//
+//   - the bond script is derived here from the roster, never accepted from the
+//     wire (buildForfeitableBonds, and re-derived on store load);
+//   - the punishment key is this seat's own, from its seed;
+//   - the branch names this seat's own session key.
+//
+// Given those, a key that is not the accused's opens no branch: escrow.ForfeitIndex
+// refuses it offline before anything is built, and the script engine in
+// escrow's finishBondSpend refuses the assembled spend before the bytes leave
+// this process. So the name is literal - this spends a branch whose secret the
+// accused exposed. It is not a general power to punish a cheat: a game whose
+// cheating exposes no key has nothing for this verb to spend, and the ladder is
+// its only lever.
+//
+// The key is used and not kept: it is never stored on the table and never
+// logged.
+func (r *Runtime) Seize(ctx context.Context, match string, seat uint32, exposed *evidence.Exposed) error {
+	if exposed.Key() == nil {
+		return fmt.Errorf("no key was exposed, so there is no bond to seize")
+	}
+	return r.seize(ctx, match, seat, exposed.Key())
+}
+
+// seize is the sweep itself, over a bare key, so Forfeit's translation can
+// reach it without minting an evidence.Exposed it never held the halves for.
+func (r *Runtime) seize(ctx context.Context, match string, seat uint32, recovered *secp256k1.PrivateKey) error {
 	r.mu.Lock()
-	t, ok := r.tables[rl.Match]
+	t, ok := r.tables[match]
 	r.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("no table %q", rl.Match)
+		return fmt.Errorf("no table %q", match)
 	}
-	bond, ok := r.ForfeitableBond(rl.Match, rl.Against)
+	mine, ok := t.form.OurSeat()
 	if !ok {
-		return fmt.Errorf("seat %d has no forfeitable bond; every seat has to announce first", rl.Against)
+		return fmt.Errorf("this table has not seated us")
+	}
+	if seat == mine {
+		// Reachable, and worth its own sentence: without it this fails
+		// four frames down as "this bond has no punishment branch for
+		// that key", which reads like a derivation bug.
+		return fmt.Errorf("seat %d is this seat, and a bond is not seized from oneself", seat)
+	}
+	bond, ok := r.ForfeitableBond(match, seat)
+	if !ok {
+		return fmt.Errorf("seat %d has no forfeitable bond; every seat has to announce first", seat)
 	}
 	r.mu.Lock()
-	funded, isFunded := t.forfeitFunded[rl.Against]
+	funded, isFunded := t.forfeitFunded[seat]
 	punisher := t.punish
 	r.mu.Unlock()
 	if !isFunded || funded.outpoint == "" {
-		return fmt.Errorf("seat %d's forfeitable bond is not on the chain, so there is nothing to take", rl.Against)
+		return fmt.Errorf("seat %d's forfeitable bond is not on the chain, so there is nothing to take", seat)
 	}
 	if punisher == nil {
 		return fmt.Errorf("this seat holds no punishment key for that table")
@@ -279,10 +304,6 @@ func (r *Runtime) sweepForfeited(ctx context.Context, rl ruling.Ruling, recovere
 			"asking again would be a double spend", funded.outpoint)
 	}
 
-	mine, ok := t.form.OurSeat()
-	if !ok {
-		return fmt.Errorf("this table has not seated us")
-	}
 	seats, _ := t.form.Seats()
 	matchID, ok := t.form.RosterHash()
 	if !ok {
@@ -290,7 +311,7 @@ func (r *Runtime) sweepForfeited(ctx context.Context, rl ruling.Ruling, recovere
 	}
 	script, err := hex.DecodeString(bond.ScriptHex)
 	if err != nil || len(script) == 0 {
-		return fmt.Errorf("seat %d's forfeitable bond has no script", rl.Against)
+		return fmt.Errorf("seat %d's forfeitable bond has no script", seat)
 	}
 	prevout, err := outpointOf(funded.outpoint)
 	if err != nil {
@@ -322,7 +343,7 @@ func (r *Runtime) sweepForfeited(ctx context.Context, rl ruling.Ruling, recovere
 		return fmt.Errorf("send the sweep: %w", err)
 	}
 	r.noteSweeping(funded.outpoint)
-	r.log.Infof("table %s: took seat %d's forfeitable bond in %s", rl.Match, rl.Against, txid)
+	r.log.Infof("table %s: took seat %d's forfeitable bond in %s", match, seat, txid)
 	return nil
 }
 

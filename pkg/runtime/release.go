@@ -76,13 +76,17 @@ func (r *Runtime) tableBondOf(t *table, seat uint32) (membership.TableBond, erro
 	return membership.TableBond{}, fmt.Errorf("this table has no bond for seat %d", seat)
 }
 
-// releaseTableBond hands a seat's table bond back cooperatively.
+// Release hands this seat's table bond back cooperatively, which is what a
+// match ending with nothing to punish comes to.
+//
+// Only this seat's own: there is no argument for whose, because a release pays
+// its owner and nothing else, so there is nothing to name.
 //
 // Both seats sign, because the bond's cooperative branch needs both. If the
 // other seat will not, the money is not stuck: the same bond has a backstop
 // branch its owner can spend alone once the lock matures, which is what makes
 // withholding a signature pointless rather than profitable.
-func (r *Runtime) releaseTableBond(ctx context.Context, match string) error {
+func (r *Runtime) Release(ctx context.Context, match string) error {
 	t, mine, err := r.ourSeatAt(match)
 	if err != nil {
 		return err
