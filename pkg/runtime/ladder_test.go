@@ -190,3 +190,107 @@ func TestAChainNeedsTheBondOnTheChain(t *testing.T) {
 		t.Fatal("built a chain against a bond nobody had funded")
 	}
 }
+
+// An answer and a take both refuse an output that is not a rung of this chain.
+// Getting this wrong means signing a spend of somebody else's coin.
+func TestAnswerAndTakeRefuseAnOutputThatIsNotARung(t *testing.T) {
+	fake, rt, _ := stand(t, &trivialGame{})
+	sid, _ := bondedTwo(t, rt, fake)
+	if err := rt.PresignLadder(context.Background(), sid); err != nil {
+		t.Fatalf("presign: %v", err)
+	}
+	if err := rt.setPayout(context.Background(), payTo(t)); err != nil {
+		t.Fatalf("payout: %v", err)
+	}
+	// Somebody else's output.
+	other := strings.Repeat("f2", 32)
+	fake.Place(other, 0, []byte{0x51}, 100_000, fake.Height())
+	op := other + ":0"
+
+	for _, tc := range []struct {
+		name string
+		run  func() error
+	}{
+		{"answer", func() error { return rt.AnswerAccusation(context.Background(), sid, op) }},
+		{"take", func() error { return rt.TakeExpiredClaim(context.Background(), sid, op) }},
+	} {
+		err := tc.run()
+		if err == nil {
+			t.Errorf("%s: signed a spend of an output that is not a rung", tc.name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "not a rung of this chain") {
+			t.Errorf("%s: refused for the wrong reason: %v", tc.name, err)
+		}
+	}
+}
+
+// Neither spends an output that is not there.
+func TestAnswerAndTakeRefuseAnOutputThatIsNotThere(t *testing.T) {
+	fake, rt, _ := stand(t, &trivialGame{})
+	sid, _ := bondedTwo(t, rt, fake)
+	if err := rt.PresignLadder(context.Background(), sid); err != nil {
+		t.Fatalf("presign: %v", err)
+	}
+	if err := rt.setPayout(context.Background(), payTo(t)); err != nil {
+		t.Fatalf("payout: %v", err)
+	}
+	op := strings.Repeat("f3", 32) + ":0"
+	// The script check below would refuse an empty output too; pin which
+	// refusal this is, so the not-found guard is the one being tested.
+	for _, tc := range []struct {
+		name string
+		run  func() error
+	}{
+		{"answer", func() error { return rt.AnswerAccusation(context.Background(), sid, op) }},
+		{"take", func() error { return rt.TakeExpiredClaim(context.Background(), sid, op) }},
+	} {
+		err := tc.run()
+		if err == nil {
+			t.Errorf("%s: spent an output that is not there", tc.name)
+			continue
+		}
+		if !strings.Contains(err.Error(), "holds no coin") {
+			t.Errorf("%s: refused for the wrong reason: %v", tc.name, err)
+		}
+	}
+}
+
+// This process does not spend the same output twice.
+func TestAnswerAndTakeWillNotSpendTheSameOutputTwice(t *testing.T) {
+	fake, rt, _ := stand(t, &trivialGame{})
+	sid, _ := bondedTwo(t, rt, fake)
+	op := strings.Repeat("f4", 32) + ":0"
+	rt.noteSweeping(op)
+
+	if err := rt.AnswerAccusation(context.Background(), sid, op); err == nil ||
+		!strings.Contains(err.Error(), "already on its way") {
+		t.Errorf("answer: %v", err)
+	}
+	if err := rt.TakeExpiredClaim(context.Background(), sid, op); err == nil ||
+		!strings.Contains(err.Error(), "already on its way") {
+		t.Errorf("take: %v", err)
+	}
+}
+
+// A seat cannot take a claim against itself.
+func TestASeatCannotTakeAClaimAgainstItself(t *testing.T) {
+	fake, rt, _ := stand(t, &trivialGame{})
+	sid, _ := bondedTwo(t, rt, fake)
+	if err := rt.PresignLadder(context.Background(), sid); err != nil {
+		t.Fatalf("presign: %v", err)
+	}
+	tbl := tableOf(t, rt, sid)
+	rt.mu.Lock()
+	tbl.ladder.against = ourSeatOfLocked(tbl)
+	rt.mu.Unlock()
+	err := rt.TakeExpiredClaim(context.Background(), sid, strings.Repeat("f5", 32)+":0")
+	if err == nil || !strings.Contains(err.Error(), "against itself") {
+		t.Fatalf("took a claim against itself: %v", err)
+	}
+}
+
+func ourSeatOfLocked(t *table) uint32 {
+	seat, _ := t.form.OurSeat()
+	return seat
+}

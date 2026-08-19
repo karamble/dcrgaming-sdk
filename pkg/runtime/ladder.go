@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"strings"
 
 	"github.com/decred/dcrd/txscript/v4/stdaddr"
 	"github.com/decred/dcrd/wire"
@@ -286,4 +287,141 @@ func (r *Runtime) Ladder(match string) (ready, run int, ok bool) {
 		}
 	}
 	return ready, t.ladder.run, true
+}
+
+// AnswerAccusation is the accused seat replying to a rung: the claimed bond
+// straight back into its own table bond.
+//
+// Signed alone, and that is the point. An accusation is not a verdict; it is a
+// question the accused can answer for the cost of one fee. A seat that is alive
+// and answering loses only attrition, which is what makes a false accusation
+// worthless rather than dangerous.
+func (r *Runtime) AnswerAccusation(ctx context.Context, match, claimedOutpoint string) error {
+	t, mine, err := r.ourSeatAt(match)
+	if err != nil {
+		return err
+	}
+	if r.isSweeping(claimedOutpoint) {
+		return fmt.Errorf("an answer to %s is already on its way from this process", claimedOutpoint)
+	}
+	draft, err := r.accuseDraft(t, mine)
+	if err != nil {
+		return err
+	}
+	claimed, err := draft.ClaimedScript()
+	if err != nil {
+		return fmt.Errorf("derive the claimed bond: %w", err)
+	}
+	prevout, value, err := r.claimedOutput(ctx, claimedOutpoint, claimed)
+	if err != nil {
+		return err
+	}
+	session, _, err := r.seatKeys(t.form.Terms().SID)
+	if err != nil {
+		return err
+	}
+	tx, err := punish.AnswerClaim(session, escrow.AnswerDraft{
+		Claimed: claimed, Bond: draft.Bond, Prevout: prevout,
+		ValueAtoms: value, FeeAtoms: draft.FeeAtoms, Params: r.params,
+	})
+	if err != nil {
+		return fmt.Errorf("build the answer: %w", err)
+	}
+	return r.sendPunishment(ctx, tx, claimedOutpoint, "answer")
+}
+
+// TakeExpiredClaim takes a rung the accused never answered.
+//
+// The window is short and on chain, so "never answered" is a fact both sides
+// read the same way rather than an opinion. Pays only the pinned payout.
+func (r *Runtime) TakeExpiredClaim(ctx context.Context, match, claimedOutpoint string) error {
+	t, mine, err := r.ourSeatAt(match)
+	if err != nil {
+		return err
+	}
+	if r.isSweeping(claimedOutpoint) {
+		return fmt.Errorf("a take of %s is already on its way from this process", claimedOutpoint)
+	}
+	r.mu.Lock()
+	l := t.ladder
+	r.mu.Unlock()
+	if l == nil {
+		return fmt.Errorf("no accusation chain has been built at this table")
+	}
+	if l.against == mine {
+		return fmt.Errorf("this seat cannot take a claim against itself")
+	}
+	draft, err := r.accuseDraft(t, l.against)
+	if err != nil {
+		return err
+	}
+	claimed, err := draft.ClaimedScript()
+	if err != nil {
+		return fmt.Errorf("derive the claimed bond: %w", err)
+	}
+	prevout, value, err := r.claimedOutput(ctx, claimedOutpoint, claimed)
+	if err != nil {
+		return err
+	}
+	pinned, err := r.pinnedPayout()
+	if err != nil {
+		return err
+	}
+	session, _, err := r.seatKeys(t.form.Terms().SID)
+	if err != nil {
+		return err
+	}
+	tx, err := punish.TakeExpired(session, pinned, punish.Take{
+		Claimed: claimed, Prevout: prevout, ValueAtoms: value,
+		FeeAtoms: draft.FeeAtoms, Params: r.params,
+	})
+	if err != nil {
+		return fmt.Errorf("build the take: %w", err)
+	}
+	return r.sendPunishment(ctx, tx, claimedOutpoint, "take")
+}
+
+// claimedOutput reads a claimed bond off the chain and checks it really is one.
+func (r *Runtime) claimedOutput(ctx context.Context, outpoint string, claimed []byte) (wire.OutPoint, int64, error) {
+	txid, vout, err := splitOutpoint(outpoint)
+	if err != nil {
+		return wire.OutPoint{}, 0, err
+	}
+	out, err := r.bridge.UnconfirmedOutpoint(ctx, txid, vout)
+	if err != nil {
+		return wire.OutPoint{}, 0, err
+	}
+	if !out.Found {
+		return wire.OutPoint{}, 0, fmt.Errorf("%s holds no coin", outpoint)
+	}
+	_, want, err := escrow.Address(claimed, r.params)
+	if err != nil {
+		return wire.OutPoint{}, 0, err
+	}
+	if got := hex.EncodeToString(want); !strings.EqualFold(got, out.PkScriptHex) {
+		return wire.OutPoint{}, 0, fmt.Errorf(
+			"%s pays %s and the claimed bond derives %s, so this is not a rung of this chain; "+
+				"nothing was signed", outpoint, out.PkScriptHex, got)
+	}
+	prevout, err := outpointOf(outpoint)
+	if err != nil {
+		return wire.OutPoint{}, 0, err
+	}
+	return prevout, out.ValueAtoms, nil
+}
+
+// sendPunishment broadcasts one punishment spend and remembers it, so the same
+// output is not spent twice from this process.
+func (r *Runtime) sendPunishment(ctx context.Context, tx *wire.MsgTx, outpoint, what string) error {
+	raw, err := tx.Bytes()
+	if err != nil {
+		return err
+	}
+	txid, err := r.bridge.Broadcast(ctx, hex.EncodeToString(raw))
+	if err != nil {
+		return fmt.Errorf("send the %s: %w", what, err)
+	}
+	r.noteSweeping(outpoint)
+	r.log.Infof("%s of %s sent in %s", what, outpoint, txid)
+	return nil
 }
