@@ -166,19 +166,57 @@ func TestAReclaimToSomethingThatIsNotAnAddressIsRefused(t *testing.T) {
 	}
 }
 
-// The two kinds that need a table's deposit records say so plainly rather than
-// guessing at a script.
-func TestTheKindsThatNeedFundingSaySo(t *testing.T) {
+// A stake or table bond at a table this game is not at is refused, and so is
+// one at a table that has not seated. Neither guesses at a script: a reclaim
+// built against a guessed script would be signed and then rejected by the node,
+// which an operator reads as their money being stuck.
+func TestStakeAndTableBondReclaimNeedASeatedTable(t *testing.T) {
 	_, rt, _ := stand(t, &trivialGame{})
+	sid, err := accept(rt, invite(t, nil), testGCID)
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
 	for _, kind := range []gamingpb.Reclaim_Kind{
 		gamingpb.Reclaim_STAKE, gamingpb.Reclaim_TABLE_BOND,
 	} {
-		_, err := rt.doReclaim(context.Background(), &gamingpb.Reclaim{
-			Kind: kind, Sid: "abcdef01", DestAddr: payTo(t),
-		})
-		if !errors.Is(err, ErrNotYet) {
-			t.Errorf("%v: %v", kind, err)
+		// A table bond names its own output; supply one so both kinds
+		// reach the seating check rather than one stopping short of it.
+		named := ""
+		if kind == gamingpb.Reclaim_TABLE_BOND {
+			named = bondOutpoint
 		}
+		if _, err := rt.doReclaim(context.Background(), &gamingpb.Reclaim{
+			Kind: kind, Sid: "no-such-table", DestAddr: payTo(t), Outpoint: named,
+		}); err == nil {
+			t.Errorf("%v: reclaimed at a table this game is not at", kind)
+		}
+		_, err := rt.doReclaim(context.Background(), &gamingpb.Reclaim{
+			Kind: kind, Sid: sid, DestAddr: payTo(t), Outpoint: named,
+		})
+		if err == nil {
+			t.Errorf("%v: reclaimed at a table that has not seated", kind)
+			continue
+		}
+		if errors.Is(err, ErrNotYet) {
+			t.Errorf("%v: still reports the stage as unbuilt: %v", kind, err)
+		}
+		if !strings.Contains(err.Error(), "seated") {
+			t.Errorf("%v: refused for the wrong reason: %v", kind, err)
+		}
+	}
+}
+
+// A table bond names the output it spends, because nothing records it for the
+// seat the way a stake is recorded.
+func TestATableBondReclaimMustNameItsOutput(t *testing.T) {
+	_, rt, _ := stand(t, &trivialGame{})
+	_, err := rt.tableBondClaim(&gamingpb.Reclaim{Kind: gamingpb.Reclaim_TABLE_BOND, Sid: "abcdef01"})
+	if err == nil {
+		t.Fatal("built a table bond reclaim with no output")
+	}
+	// The table lookup below would fail too, so pin which refusal this is.
+	if !strings.Contains(err.Error(), "must name the output") {
+		t.Fatalf("refused for the wrong reason: %v", err)
 	}
 }
 

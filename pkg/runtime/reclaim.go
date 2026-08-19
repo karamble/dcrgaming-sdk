@@ -14,6 +14,7 @@ import (
 
 	"github.com/karamble/dcrgaming-sdk/pkg/escrow"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/gamingpb"
+	"github.com/karamble/dcrgaming-sdk/pkg/membership"
 )
 
 // defaultReclaimFee is what a reclaim pays when the bridge names no fee. These
@@ -81,16 +82,116 @@ func (r *Runtime) claimFor(req *gamingpb.Reclaim) (claim, error) {
 			lock: escrow.MinBondBlocks, sigScript: escrow.BondSigScript,
 		}, nil
 
-	case gamingpb.Reclaim_STAKE, gamingpb.Reclaim_TABLE_BOND:
-		// Both name an output a table holds, and a table does not record
-		// its deposits until the funding stage exists. Said plainly rather
-		// than answered wrongly: a reclaim built against a script this
-		// process guessed would be signed and refused by the node, and an
-		// operator would read that as their money being stuck.
-		return claim{}, fmt.Errorf("reclaiming a %s: %w",
-			strings.ToLower(req.GetKind().String()), ErrNotYet)
+	case gamingpb.Reclaim_STAKE:
+		return r.stakeClaim(req)
+
+	case gamingpb.Reclaim_TABLE_BOND:
+		return r.tableBondClaim(req)
 	}
 	return claim{}, fmt.Errorf("this game does not know how to reclaim that")
+}
+
+// stakeClaim is this seat's own buy-in, coming home through the refund branch
+// of its escrow once the table's CSV lock has matured.
+//
+// A named outpoint overrides the recorded one, because a seat can be paid into
+// its deposit address more than once and the record only knows about the
+// payment this process made. Anything else at that address is still this seat's
+// coin and still opens with the same key.
+func (r *Runtime) stakeClaim(req *gamingpb.Reclaim) (claim, error) {
+	t, seat, err := r.ourSeatAt(req.GetSid())
+	if err != nil {
+		return claim{}, err
+	}
+	deposits, err := t.form.Deposits(r.params)
+	if err != nil {
+		return claim{}, err
+	}
+	var redeemHex string
+	for _, d := range deposits {
+		if d.Seat == seat {
+			redeemHex = d.RedeemScriptHex
+		}
+	}
+	redeem, err := hex.DecodeString(redeemHex)
+	if err != nil || len(redeem) == 0 {
+		return claim{}, fmt.Errorf("seat %d has no escrow script", seat)
+	}
+
+	outpoint := strings.TrimSpace(req.GetOutpoint())
+	if outpoint == "" {
+		r.mu.Lock()
+		outpoint = t.funded[seat].outpoint
+		r.mu.Unlock()
+	}
+	if outpoint == "" {
+		return claim{}, fmt.Errorf("nothing was ever paid into seat %d of %s", seat, req.GetSid())
+	}
+	key, _, err := r.seatKeys(t.form.Terms().SID)
+	if err != nil {
+		return claim{}, err
+	}
+	return claim{
+		outpoint: outpoint, script: redeem, key: key,
+		lock: t.form.Terms().CSVBlocks, sigScript: escrow.RefundSigScript,
+	}, nil
+}
+
+// tableBondClaim is this seat's table bond, coming home through its backstop
+// branch once the bond lock has matured.
+//
+// The session key, not the bond key: a table bond is derived per table and its
+// backstop branch names the seat's own session key.
+func (r *Runtime) tableBondClaim(req *gamingpb.Reclaim) (claim, error) {
+	// Checked before anything is looked up: nothing records a table bond's
+	// output for a seat the way a stake is recorded, so the caller has to
+	// name it, and a request that does not is malformed rather than unlucky.
+	outpoint := strings.TrimSpace(req.GetOutpoint())
+	if outpoint == "" {
+		return claim{}, fmt.Errorf("a table bond reclaim must name the output it is spending")
+	}
+	t, seat, err := r.ourSeatAt(req.GetSid())
+	if err != nil {
+		return claim{}, err
+	}
+	bonds, err := t.form.TableBonds(r.params)
+	if err != nil {
+		return claim{}, err
+	}
+	var scriptHex string
+	for _, b := range bonds {
+		if b.Seat == seat {
+			scriptHex = b.ScriptHex
+		}
+	}
+	script, err := hex.DecodeString(scriptHex)
+	if err != nil || len(script) == 0 {
+		return claim{}, fmt.Errorf("seat %d has no table bond", seat)
+	}
+	key, _, err := r.seatKeys(t.form.Terms().SID)
+	if err != nil {
+		return claim{}, err
+	}
+	return claim{
+		outpoint: outpoint, script: script, key: key,
+		lock: membership.TableBondBlocks, sigScript: escrow.BackstopSigScript,
+	}, nil
+}
+
+// ourSeatAt finds a seated table this game is at, and which seat is ours.
+func (r *Runtime) ourSeatAt(sid string) (*table, uint32, error) {
+	sid = strings.ToLower(strings.TrimSpace(sid))
+	r.mu.Lock()
+	t, ok := r.tables[sid]
+	r.mu.Unlock()
+	if !ok {
+		return nil, 0, fmt.Errorf("this game is not at table %q", sid)
+	}
+	seat, ok := t.form.OurSeat()
+	if !ok {
+		return nil, 0, fmt.Errorf("table %q has not seated us yet", sid)
+	}
+	return t, seat, nil
 }
 
 // pullHome checks a claim is really claimable and then spends it.
