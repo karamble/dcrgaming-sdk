@@ -159,9 +159,71 @@ func (r *Runtime) adoptSettlement(ctx context.Context, match string, body schema
 	}
 
 	r.mu.Lock()
+	// A sender that says it is still short gets an answer, whether or not
+	// this peer has finished - the peer most able to answer is exactly the
+	// one that has everything and so has nothing of its own left to send.
+	// Without it the peer that proposed first, into a table that had not
+	// proposed yet and dropped it, holds a table it believes unpaid until
+	// the refund timelocks.
 	held.sigs[body.Signer] = sigs
 	r.mu.Unlock()
+
+	if body.Want {
+		if err := r.saySettlementSigs(ctx, t, false); err != nil {
+			r.log.Debugf("table %s: answering a peer short of our payout signature: %v", t.match, err)
+		}
+	}
 	return r.completeSettlement(ctx, t)
+}
+
+// proposeSettlement says this seat's signatures again, while the payout still
+// needs them.
+//
+// Gated on the payout not being sent, because a table that has paid out has
+// nothing left to say and would otherwise repeat itself every block for as
+// long as it existed.
+func (r *Runtime) proposeSettlement(ctx context.Context, t *table) error {
+	r.mu.Lock()
+	sent := t.settle == nil || t.settle.done
+	r.mu.Unlock()
+	if sent {
+		return nil
+	}
+	return r.saySettlementSigs(ctx, t, true)
+}
+
+// saySettlementSigs says this seat's signatures whether or not this seat is
+// finished with them.
+//
+// Not gated, and that is the point: it answers a peer that is still short, and
+// the peer most able to answer is exactly the one that has everything and
+// therefore nothing of its own left to send.
+func (r *Runtime) saySettlementSigs(ctx context.Context, t *table, want bool) error {
+	r.mu.Lock()
+	s := t.settle
+	if s == nil {
+		r.mu.Unlock()
+		return nil
+	}
+	mine, seated := t.form.OurSeat()
+	seats, _ := t.form.Seats()
+	if !seated {
+		r.mu.Unlock()
+		return nil
+	}
+	mineHex := hex.EncodeToString(seats[mine])
+	ours, have := s.sigs[mineHex]
+	raw, err := s.tx.Bytes()
+	r.mu.Unlock()
+	if !have || err != nil {
+		return err
+	}
+
+	body := schema.Settle{Tx: hex.EncodeToString(raw), Signer: mineHex, Want: want}
+	for _, sig := range ours {
+		body.Sigs = append(body.Sigs, hex.EncodeToString(sig))
+	}
+	return r.send(ctx, t, schema.KindSettle, body)
 }
 
 // completeSettlement sends the payout once every seat has signed.

@@ -185,6 +185,17 @@ type Settle struct {
 	Tx     string   `json:"tx"`
 	Signer string   `json:"signer"` // hex compressed session pubkey
 	Sigs   []string `json:"sigs"`   // one per input, in input order
+	// Want says the sender is still short of somebody's signature.
+	//
+	// It is what stops two peers answering each other forever. A signature
+	// that arrives has to be answered while the sender still needs one
+	// back, and an answer is otherwise indistinguishable from the request
+	// it answers - so a peer that had everything would reply to a reply,
+	// and the pair would keep it up for as long as the table lived.
+	//
+	// Absent means no: a peer that does not set it is one that never asks,
+	// and is answered by nobody.
+	Want bool `json:"want,omitempty"`
 }
 
 // HeadFrom renders a seat's claim about the log head.

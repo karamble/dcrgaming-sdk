@@ -558,6 +558,13 @@ func (r *Runtime) repeatAnnouncements(ctx context.Context, t *table) {
 		}
 	}
 	r.repeatLadders(ctx, t)
+
+	// The payout, while it is still short of somebody. A settlement one
+	// signature short is a table that falls back to its refund timelocks,
+	// which is weeks of everybody's money for want of one message.
+	if err := r.proposeSettlement(ctx, t); err != nil {
+		r.log.Debugf("table %s: repeating the payout: %v", t.match, err)
+	}
 }
 
 // repeatLadders says this seat's rung signatures again, while any rung is

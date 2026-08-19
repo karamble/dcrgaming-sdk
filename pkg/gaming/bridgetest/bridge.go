@@ -260,6 +260,19 @@ func (b *Bridge) Sent() []*gamingpb.Frame {
 	return append([]*gamingpb.Frame(nil), b.frames...)
 }
 
+// Broadcasts is every transaction this chain was asked to relay, and how many
+// times each was asked for. A test that cares about a transaction going out
+// once rather than twice reads this.
+func (b *Bridge) Broadcasts() map[string]int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make(map[string]int, len(b.sent))
+	for k, v := range b.sent {
+		out[k] = v
+	}
+	return out
+}
+
 // Relayed is how many frames have been pushed to a subscriber, which a test
 // waits on rather than sleeping.
 func (b *Bridge) Relayed() int64 { return b.pushed.Load() }

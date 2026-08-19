@@ -751,3 +751,187 @@ func bothBondsKnown(rt *Runtime, sid string) bool {
 	}
 	return true
 }
+
+// Two peers pay a table out, over the wire.
+//
+// The whole point of the thing. Everything else is arrangement; this is the
+// money moving, and it needs every seat's signature on one transaction: each
+// stake sits behind its own script and the settlement branch of every one of
+// them names the whole table, so a settlement one signature short is a table
+// that falls back to its refund timelocks - weeks of everybody's money locked
+// up because two peers could not finish a conversation.
+func TestTwoRuntimesPayATableOut(t *testing.T) {
+	fake := bridgetest.New(bridgetest.Options{
+		Game: "battleships", Network: "mainnet",
+		Params: chaincfg.TestNet3Params(), Height: 800,
+	})
+	srv, err := fake.Serve("seat0", "seat1")
+	if err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	one := wireSeat(t, ctx, srv, "seat0")
+	two := wireSeat(t, ctx, srv, "seat1")
+	go func() { _ = one.Run(ctx) }()
+	go func() { _ = two.Run(ctx) }()
+	waitFor(t, "both seats subscribed", func() bool { return fake.Subscribers() == 2 })
+
+	link := invite(t, nil)
+	sid, err := accept(one, link, testGCID)
+	if err != nil {
+		t.Fatalf("first seat accepting: %v", err)
+	}
+	if _, err := accept(two, link, testGCID); err != nil {
+		t.Fatalf("second seat accepting: %v", err)
+	}
+	block := func() {
+		fake.Mine(1)
+		one.Tick(ctx, fake.Height())
+		two.Tick(ctx, fake.Height())
+	}
+	waitFor(t, "both sides seated", func() bool {
+		block()
+		_, a := one.Seats(sid)
+		_, b := two.Seats(sid)
+		return a && b
+	})
+
+	// Where each wants to be paid, and the stake each is playing for.
+	for name, rt := range map[string]*Runtime{"one": one, "two": two} {
+		if err := rt.setPayout(ctx, payTo(t)); err != nil {
+			t.Fatalf("%s's payout: %v", name, err)
+		}
+		if err := rt.Fund(ctx, sid); err != nil {
+			t.Fatalf("%s funding its stake: %v", name, err)
+		}
+	}
+	waitFor(t, "both stakes and both payouts to be known on both sides", func() bool {
+		block()
+		return tableReadyToSettle(one, sid) && tableReadyToSettle(two, sid)
+	})
+
+	// The game says who won; the runtime has no opinion about it. Both
+	// sides say the same thing, because they are running the same rules.
+	mine, _ := seatOfRuntime(one, sid)
+	// The shares divide what the table holds; the fee comes out of the
+	// transaction, not out of the arithmetic the seats agree.
+	pot := int64(one.Terms(sid).BuyInAtoms) * 2
+	out := Outcome{Shares: map[uint32]int64{mine: pot}}
+	if err := one.Settle(ctx, sid, out); err != nil {
+		t.Fatalf("first seat settling: %v", err)
+	}
+	if err := two.Settle(ctx, sid, out); err != nil {
+		t.Fatalf("second seat settling: %v", err)
+	}
+
+	waitFor(t, "both sides to know the table has been paid out", func() bool {
+		block()
+		return settlementDone(one, sid) && settlementDone(two, sid)
+	})
+	// One transaction, whoever sent it. Both peers holding every signature
+	// will both send it, and that is wanted rather than tolerated: it is
+	// the same bytes, so a chain takes the first and tells the second it
+	// already has it, and neither peer depends on the other actually
+	// sending the thing that pays them. What would be a double spend is two
+	// *different* transactions, which is what this counts.
+	sent := fake.Broadcasts()
+	if len(sent) != 1 {
+		t.Fatalf("%d different transactions were broadcast, want one settlement: %v", len(sent), sent)
+	}
+	// And both sides agree it is done, or one of them is still waiting to
+	// be paid.
+	for name, rt := range map[string]*Runtime{"one": one, "two": two} {
+		if !settlementDone(rt, sid) {
+			t.Fatalf("%s does not know its table has been paid out", name)
+		}
+	}
+
+	// The asymmetric case: one side short of the other's signature while
+	// the other has everything. The one with everything has nothing of its
+	// own left to say, so unless a repeat is answered the short one waits
+	// for a message that will never come again.
+	forgetTheirPayoutSignature(t, two, sid)
+	if settlementDone(two, sid) {
+		t.Fatal("the signature was not taken away, so this proves nothing")
+	}
+	if !settlementDone(one, sid) {
+		t.Fatal("the other side is short too, so this tests the wrong thing")
+	}
+	waitFor(t, "the missing payout signature to come back", func() bool {
+		block()
+		return settlementDone(two, sid)
+	})
+
+	// And then it stops. Checked last, after the answering above, because
+	// that is where an answer indistinguishable from a request would send
+	// the two of them into replying to each other for as long as the table
+	// lived - and a check taken before it would never see it.
+	for range 4 {
+		block()
+	}
+	quiet := len(fake.Sent())
+	for range 4 {
+		block()
+	}
+	if grown := len(fake.Sent()) - quiet; grown > 0 {
+		t.Errorf("%d frames went out over four blocks after the table was paid and settled", grown)
+	}
+}
+
+// forgetTheirPayoutSignature drops one seat's copy of the opponent's signature
+// on the payout, the way a message that never arrived would have left it.
+func forgetTheirPayoutSignature(t *testing.T, rt *Runtime, sid string) {
+	t.Helper()
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	tbl := rt.tables[sid]
+	if tbl.settle == nil {
+		t.Fatal("no payout to forget anything from")
+	}
+	mine, _ := tbl.form.OurSeat()
+	seats, _ := tbl.form.Seats()
+	mineHex := hex.EncodeToString(seats[mine])
+	for signer := range tbl.settle.sigs {
+		if signer != mineHex {
+			delete(tbl.settle.sigs, signer)
+		}
+	}
+	tbl.settle.done = false
+}
+
+// tableReadyToSettle reports whether a peer knows every stake and every payout.
+func tableReadyToSettle(rt *Runtime, sid string) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	t, ok := rt.tables[sid]
+	if !ok || t.form == nil {
+		return false
+	}
+	seats, seated := t.form.Seats()
+	if !seated {
+		return false
+	}
+	return len(t.funded) == len(seats) && len(t.payouts) == len(seats)
+}
+
+// seatOfRuntime is this peer's own seat.
+func seatOfRuntime(rt *Runtime, sid string) (uint32, bool) {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	t, ok := rt.tables[sid]
+	if !ok || t.form == nil {
+		return 0, false
+	}
+	return t.form.OurSeat()
+}
+
+// settlementDone reports whether a peer believes its table has been paid out.
+func settlementDone(rt *Runtime, sid string) bool {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	t, ok := rt.tables[sid]
+	return ok && t.settle != nil && t.settle.done
+}
