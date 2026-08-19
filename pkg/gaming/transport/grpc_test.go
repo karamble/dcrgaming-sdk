@@ -362,10 +362,10 @@ func TestHelloIntroducesTheConfiguredIdentity(t *testing.T) {
 	t.Cleanup(srv.Stop)
 
 	c, err := Dial(context.Background(), BridgeConfig{
-		Addr:          lis.Addr().String(),
-		ClientCert:    clientCert,
-		ClientKey:     clientKey,
-		BridgeCert:    serverCert,
+		Addr:            lis.Addr().String(),
+		ClientCert:      clientCert,
+		ClientKey:       clientKey,
+		BridgeCert:      serverCert,
 		GameID:          "battleships",
 		GameVer:         9,
 		ClientVersion:   "shipyard",
