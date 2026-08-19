@@ -2,13 +2,17 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
 
 	"github.com/decred/dcrd/txscript/v4/stdaddr"
+	"github.com/decred/dcrd/wire"
 	"github.com/decred/slog"
 
+	"github.com/karamble/dcrgaming-sdk/pkg/escrow"
+	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/transport"
 	"github.com/karamble/dcrgaming-sdk/pkg/identity"
 	"github.com/karamble/dcrgaming-sdk/pkg/membership"
@@ -89,6 +93,17 @@ type table struct {
 	// announces because it goes into the settlement they all sign.
 	funded  map[uint32]staked
 	payouts map[uint32][]byte
+
+	// settle gathers signatures on this table's payout.
+	settle *settlement
+}
+
+// settlement is one table's payout, part-signed.
+type settlement struct {
+	tx    *wire.MsgTx
+	draft escrow.SettleDraft
+	sigs  map[string][][]byte // by signer's compressed session pubkey, hex
+	done  bool
 }
 
 // staked is one seat's stake on the chain.
@@ -152,18 +167,72 @@ func New(cfg Config) (*Runtime, error) {
 	return r, nil
 }
 
-// deliver hands one decoded message to the game.
+// deliver takes one decoded message: the runtime's own if it is one, the
+// game's otherwise.
 //
-// The runtime does not look inside a body and does not retry: a redelivered
-// move is a replayed move, so a game that wants one has to ask.
+// The runtime does not look inside a game's body and does not retry: a
+// redelivered move is a replayed move, so a game that wants one has to ask.
 func (r *Runtime) deliver(d transport.Delivery) {
 	msg := Message{Match: d.SID, GCID: d.GCID, From: d.Sender}
 	if d.Msg != nil {
 		msg.Kind, msg.Body = d.Msg.Kind, d.Msg.Body
 	}
+	if r.ours(msg.Kind) {
+		if err := r.handleOurs(r.runCtx, msg); err != nil {
+			r.log.Warnf("a %s message was not taken: %v", msg.Kind, err)
+		}
+		return
+	}
 	if err := r.rules.Handle(r.runCtx, msg); err != nil {
 		r.log.Warnf("the game refused a %s message: %v", msg.Kind, err)
 	}
+}
+
+// ours reports whether a message kind belongs to the runtime rather than the
+// game.
+//
+// These are the lifecycle's own traffic. A game that used one of these names
+// for its own purposes would find its messages disappearing into the runtime,
+// which is why the set is small, fixed, and documented.
+func (r *Runtime) ours(k schema.Kind) bool {
+	switch k {
+	case schema.KindJoin, schema.KindCommit, schema.KindSettle:
+		return true
+	}
+	return false
+}
+
+// handleOurs takes one of the runtime's own messages.
+func (r *Runtime) handleOurs(ctx context.Context, msg Message) error {
+	switch msg.Kind {
+	case schema.KindJoin:
+		var j membership.Join
+		if err := json.Unmarshal(msg.Body, &j); err != nil {
+			return fmt.Errorf("read a join: %w", err)
+		}
+		if err := r.addJoin(msg.Match, &j); err != nil {
+			return err
+		}
+		return r.seatIfReady(ctx, msg.Match)
+
+	case schema.KindCommit:
+		var c membership.Commit
+		if err := json.Unmarshal(msg.Body, &c); err != nil {
+			return fmt.Errorf("read a commit: %w", err)
+		}
+		if err := r.addCommit(msg.Match, &c); err != nil {
+			return err
+		}
+		return r.seatIfReady(ctx, msg.Match)
+
+	case schema.KindSettle:
+		var st schema.Settle
+		if err := json.Unmarshal(msg.Body, &st); err != nil {
+			return fmt.Errorf("read a payout: %w", err)
+		}
+		return r.adoptSettlement(ctx, msg.Match, st)
+	}
+	return nil
 }
 
 // Run owns the loop until the context ends.

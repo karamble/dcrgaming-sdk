@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"github.com/decred/dcrd/wire"
 
 	"github.com/karamble/dcrgaming-sdk/pkg/escrow"
+	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
 )
 
 // settleFee is what a settlement pays when the game says nothing. It falls on
@@ -46,12 +48,185 @@ func (r *Runtime) Settle(ctx context.Context, match string, out Outcome) error {
 	if err != nil {
 		return fmt.Errorf("build the settlement: %w", err)
 	}
-	_ = tx
-	// Co-signing and broadcast need every other seat's signature to come
-	// back over the wire, which is the half that waits on the funding and
-	// dispatch stages. The draft above is built and checked here so a game
-	// integrating now finds out about a bad outcome immediately.
-	return fmt.Errorf("co-signing the settlement: %w", ErrNotYet)
+	return r.signAndProposeSettlement(ctx, match, tx, draft)
+}
+
+// signAndProposeSettlement puts this seat's signatures on a payout and tells the
+// table, then sends it if that was the last signature needed.
+func (r *Runtime) signAndProposeSettlement(ctx context.Context, match string, tx *wire.MsgTx, draft escrow.SettleDraft) error {
+	r.mu.Lock()
+	t, ok := r.tables[match]
+	r.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("no table %q", match)
+	}
+	seats, ok := t.form.Seats()
+	if !ok {
+		return fmt.Errorf("this table has no seating yet")
+	}
+	mine, ok := t.form.OurSeat()
+	if !ok {
+		return fmt.Errorf("this table has not seated us")
+	}
+	session, _, err := r.seatKeys(t.form.Terms().SID)
+	if err != nil {
+		return err
+	}
+	sigs, err := escrow.SignSettlement(tx, draft, session)
+	if err != nil {
+		return fmt.Errorf("sign the settlement: %w", err)
+	}
+
+	r.mu.Lock()
+	if t.settle == nil {
+		t.settle = &settlement{tx: tx, draft: draft, sigs: map[string][][]byte{}}
+	}
+	t.settle.sigs[hex.EncodeToString(seats[mine])] = sigs
+	r.mu.Unlock()
+
+	raw, err := tx.Bytes()
+	if err != nil {
+		return err
+	}
+	hexSigs := make([]string, 0, len(sigs))
+	for _, sig := range sigs {
+		hexSigs = append(hexSigs, hex.EncodeToString(sig))
+	}
+	// Hand is poker's boundary number and means nothing to another game; the
+	// draft is what a signature is actually bound to, and a peer checks the
+	// transaction itself rather than believing this field.
+	body := schema.Settle{
+		Tx: hex.EncodeToString(raw), Signer: hex.EncodeToString(seats[mine]), Sigs: hexSigs,
+	}
+	if err := r.send(ctx, t, schema.KindSettle, body); err != nil {
+		return fmt.Errorf("tell the table about the payout: %w", err)
+	}
+	return r.completeSettlement(ctx, t)
+}
+
+// adoptSettlement takes another seat's signatures on a payout.
+//
+// The proposal is rebuilt from this peer's own view and compared before
+// anything is signed. That is the load-bearing check: a seat that could get the
+// others to sign a payout they had not computed themselves could pay itself the
+// table.
+func (r *Runtime) adoptSettlement(ctx context.Context, match string, body schema.Settle) error {
+	r.mu.Lock()
+	t, ok := r.tables[match]
+	r.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("no table %q", match)
+	}
+	seats, ok := t.form.Seats()
+	if !ok {
+		return fmt.Errorf("this table has no seating yet")
+	}
+	signer, err := hex.DecodeString(body.Signer)
+	if err != nil || !seatedKey(seats, signer) {
+		return fmt.Errorf("a payout was signed by somebody who is not at this table")
+	}
+
+	raw, err := hex.DecodeString(body.Tx)
+	if err != nil {
+		return fmt.Errorf("the proposed payout is not hex: %w", err)
+	}
+	tx := wire.NewMsgTx()
+	if err := tx.Deserialize(bytes.NewReader(raw)); err != nil {
+		return fmt.Errorf("the proposed payout is not a transaction: %w", err)
+	}
+
+	r.mu.Lock()
+	held := t.settle
+	r.mu.Unlock()
+	if held == nil {
+		return fmt.Errorf("no payout has been proposed at this table yet, so there is nothing to agree with")
+	}
+	if err := escrow.CheckSettleDraft(tx, held.draft); err != nil {
+		return fmt.Errorf("not signing a payout this peer would not have built: %w", err)
+	}
+
+	sigs := make([][]byte, 0, len(body.Sigs))
+	for _, h := range body.Sigs {
+		sig, err := hex.DecodeString(h)
+		if err != nil {
+			return fmt.Errorf("a signature is not hex: %w", err)
+		}
+		sigs = append(sigs, sig)
+	}
+	if len(sigs) != len(held.draft.Inputs) {
+		return fmt.Errorf("a payout over %d inputs came with %d signatures",
+			len(held.draft.Inputs), len(sigs))
+	}
+
+	r.mu.Lock()
+	held.sigs[body.Signer] = sigs
+	r.mu.Unlock()
+	return r.completeSettlement(ctx, t)
+}
+
+// completeSettlement sends the payout once every seat has signed.
+//
+// Short of a signature is not an error: the missing seat has not spoken yet.
+func (r *Runtime) completeSettlement(ctx context.Context, t *table) error {
+	r.mu.Lock()
+	s := t.settle
+	if s == nil || s.done {
+		r.mu.Unlock()
+		return nil
+	}
+	members, err := escrow.Members(s.draft.Inputs[0].Redeem)
+	if err != nil {
+		r.mu.Unlock()
+		return err
+	}
+	byInput := make([][][]byte, len(s.draft.Inputs))
+	for i := range byInput {
+		for _, m := range members {
+			sigs, ok := s.sigs[hex.EncodeToString(m)]
+			if !ok || i >= len(sigs) {
+				r.mu.Unlock()
+				return nil // still short of somebody
+			}
+			byInput[i] = append(byInput[i], sigs[i])
+		}
+	}
+	tx, draft := s.tx, s.draft
+	r.mu.Unlock()
+
+	done, err := escrow.FinishSettlement(tx, draft, byInput, r.params)
+	if err != nil {
+		return fmt.Errorf("a fully signed payout did not satisfy the escrows: %w", err)
+	}
+	raw, err := done.Bytes()
+	if err != nil {
+		return err
+	}
+	r.mu.Lock()
+	s.done = true
+	r.mu.Unlock()
+
+	txid, err := r.bridge.Broadcast(ctx, hex.EncodeToString(raw))
+	if err != nil {
+		// Every other seat holds the same signatures and the same
+		// transaction, so one of them will send it. Said rather than
+		// swallowed, but not fatal.
+		r.log.Errorf("could not send the payout; every other seat holds the same one: %v", err)
+		return nil
+	}
+	if h, ok := r.rules.(Settled); ok {
+		h.Settled(ctx, t.match, txid)
+	}
+	return nil
+}
+
+// seatedKey reports whether a key is one of the table's seats.
+func seatedKey(seats map[uint32][]byte, key []byte) bool {
+	for _, k := range seats {
+		if bytes.Equal(k, key) {
+			return true
+		}
+	}
+	return false
 }
 
 // settleDraft turns an outcome into the transaction every seat will sign.

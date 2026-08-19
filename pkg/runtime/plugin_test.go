@@ -11,6 +11,7 @@ import (
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/bridgetest"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/connect"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/gamingpb"
+	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/transport"
 	"github.com/karamble/dcrgaming-sdk/pkg/identity"
 	"github.com/karamble/dcrgaming-sdk/pkg/ruling"
@@ -314,3 +315,41 @@ func TestEveryRequestIsAnsweredEvenWhenItFails(t *testing.T) {
 		}
 	}
 }
+
+// The lifecycle's own traffic is the runtime's, and never reaches the game. A
+// game that saw a join would be a game that had to know what one was.
+func TestTheRuntimeKeepsItsOwnMessagesFromTheGame(t *testing.T) {
+	_, rt, _ := stand(t, &trivialGame{})
+	for _, k := range []schema.Kind{schema.KindJoin, schema.KindCommit, schema.KindSettle} {
+		if !rt.ours(k) {
+			t.Errorf("%s was left to the game", k)
+		}
+	}
+	for _, k := range []schema.Kind{"place", "shoot", "shuffle", schema.KindAction} {
+		if rt.ours(k) {
+			t.Errorf("%s was taken from the game", k)
+		}
+	}
+}
+
+// A game's message reaches the game; a runtime message does not.
+func TestAGamesOwnMessageReachesIt(t *testing.T) {
+	_, rt, _ := stand(t, &countingGame{})
+	g := rt.rules.(*countingGame)
+
+	rt.deliver(transport.Delivery{SID: "abcdef01", Msg: &schema.Message{Kind: "shoot"}})
+	if g.seen != 1 {
+		t.Fatalf("the game saw %d of its own messages", g.seen)
+	}
+	rt.deliver(transport.Delivery{SID: "abcdef01", Msg: &schema.Message{Kind: schema.KindJoin}})
+	if g.seen != 1 {
+		t.Fatalf("a join reached the game (%d seen)", g.seen)
+	}
+}
+
+type countingGame struct {
+	battleshipsRules
+	seen int
+}
+
+func (c *countingGame) Handle(context.Context, Message) error { c.seen++; return nil }
