@@ -134,7 +134,6 @@ type table struct {
 	gcID  string
 	form  *membership.Formation
 	seats map[uint32][]byte
-	log   []Entry
 
 	// funded is where each seat's stake landed, filled in by the funding
 	// stage. payouts is where each seat asked to be paid, which every seat
@@ -444,17 +443,6 @@ func (r *Runtime) Chain(ctx context.Context) (Chain, error) {
 		return Chain{}, err
 	}
 	return Chain{Height: tip.Height, Hash: tip.Hash}, nil
-}
-
-// Log is a table's signed log so far.
-func (r *Runtime) Log(match string) []Entry {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	t, ok := r.tables[match]
-	if !ok {
-		return nil
-	}
-	return append([]Entry(nil), t.log...)
 }
 
 // Seats is a table's roster once it has formed.

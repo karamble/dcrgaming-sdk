@@ -35,9 +35,11 @@ package runtime
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
+	"github.com/karamble/dcrgaming-sdk/pkg/forfeit"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/connect"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/wire"
@@ -159,4 +161,60 @@ func (r *Runtime) Send(ctx context.Context, match string, kind schema.Kind, body
 		return err
 	}
 	return r.router.Send(ctx, t.gCID(), t.match, t.match, kind, body, class)
+}
+
+// LogKey is the key this seat signs its own moves with, bound to the table.
+//
+// The one key a game is handed, and the split is deliberate. The session key
+// holds the stake and stays here: it signs joins, payouts and releases, and a
+// game that held it could move its own money. The log key signs what the game
+// says happened, is the game's alone to use, and is expected to become public
+// the moment its owner equivocates - that is what makes a lie provable, and it
+// is why a table's log key is not the key its escrow is built on.
+//
+// Bound to the match here rather than by the caller. A log key carries the
+// table it may sign for, and one bound to the wrong table signs entries every
+// other seat refuses.
+func (r *Runtime) LogKey(match string) (*forfeit.LogKey, error) {
+	t, err := r.tableOf(match)
+	if err != nil {
+		return nil, err
+	}
+	matchID, ok := t.form.RosterHash()
+	if !ok {
+		return nil, fmt.Errorf("table %q has no settled roster, so nothing can be signed for it yet", match)
+	}
+	_, logKey, err := r.seatKeys(t.form.Terms().SID)
+	if err != nil {
+		return nil, err
+	}
+	return forfeit.LogKeyFrom(logKey, hex.EncodeToString(matchID[:]))
+}
+
+// MatchID is the roster hash: what this table is called once it has decided
+// who is at it.
+//
+// A game's own log and evidence are bound to it, so a game cannot use the
+// session id for the purpose - two tables could be formed under one session
+// and only one of them is the membership the money is bound to.
+func (r *Runtime) MatchID(match string) (string, bool) {
+	t, err := r.tableOf(match)
+	if err != nil {
+		return "", false
+	}
+	matchID, ok := t.form.RosterHash()
+	if !ok {
+		return "", false
+	}
+	return hex.EncodeToString(matchID[:]), true
+}
+
+// LogSeats is each seat's log public key, which is what checks the entries
+// that seat signs.
+func (r *Runtime) LogSeats(match string) (map[uint32][]byte, bool) {
+	t, err := r.tableOf(match)
+	if err != nil {
+		return nil, false
+	}
+	return t.form.LogSeats()
 }

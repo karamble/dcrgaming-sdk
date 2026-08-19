@@ -349,3 +349,44 @@ func payScriptFor(addr string, params stdaddr.AddressParams) ([]byte, error) {
 	_, script := a.PaymentScript()
 	return script, nil
 }
+
+// Reclaim pulls this seat's own stake home once its refund lock has matured.
+//
+// For a game whose table ended without a settlement - nobody agreed a payout,
+// or nobody was left to agree one with - so the money comes back the slow way
+// rather than waiting for somebody to notice and press a button.
+//
+// It pays the operator's payout address and nowhere else, which is not a
+// convenience: the destination of recovered money is not a game's to choose,
+// and a game that could name it could name itself.
+//
+// Safe to call early. A lock that has not matured is reported rather than
+// attempted, because attempting it builds a transaction the chain refuses and
+// tells the caller nothing useful about when to try again.
+func (r *Runtime) Reclaim(ctx context.Context, match string) error {
+	dest, err := r.payoutAddress()
+	if err != nil {
+		return err
+	}
+	c, err := r.stakeClaim(&gamingpb.Reclaim{Kind: gamingpb.Reclaim_STAKE, Sid: match})
+	if err != nil {
+		return err
+	}
+	txid, err := r.pullHome(ctx, c, dest, 0)
+	if err != nil {
+		return err
+	}
+	r.forgetOurs(match, func(t *table, seat uint32) { delete(t.funded, seat) })
+	r.log.Infof("table %s: the stake came home in %s", match, txid)
+	return nil
+}
+
+// payoutAddress is where the operator has said this game's money goes.
+func (r *Runtime) payoutAddress() (string, error) {
+	addr := strings.TrimSpace(r.Payout())
+	if addr == "" {
+		return "", fmt.Errorf(
+			"no payout address has been set, so recovered money has nowhere it is allowed to go")
+	}
+	return addr, nil
+}

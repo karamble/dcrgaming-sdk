@@ -1188,3 +1188,58 @@ func wireSeatListening(t *testing.T, ctx context.Context, srv *bridgetest.Server
 	}
 	return rt
 }
+
+// The runtime satisfies the facade it publishes.
+//
+// The interface is what a game's own tests stand in for, so a method declared
+// there and not implemented here is a game that compiles against a runtime it
+// cannot actually be given - which is how Send came to be declared for a long
+// time and never written.
+var _ Game = (*Runtime)(nil)
+
+// A game is handed its log key and nothing else it could spend with.
+//
+// The split is the point: the log key signs what a game says happened and is
+// expected to become public the moment its owner equivocates, which is what
+// makes a lie provable. The session key holds the stake, and a game holding it
+// could move its own money.
+func TestAGameIsHandedItsLogKeyAndNotItsSessionKey(t *testing.T) {
+	fake, rt, _ := stand(t, &trivialGame{})
+	sid, _ := seatTwo(t, fake, rt)
+
+	lk, err := rt.LogKey(sid)
+	if err != nil {
+		t.Fatalf("log key: %v", err)
+	}
+	matchID, ok := rt.MatchID(sid)
+	if !ok {
+		t.Fatal("the table has no match id")
+	}
+	// Bound to this table, so it cannot sign for another.
+	if lk.Match() != matchID {
+		t.Fatalf("the log key is bound to %q and the table is %q", lk.Match(), matchID)
+	}
+
+	// It is the log key, not the session key.
+	session, logKey, err := rt.seatKeys(rt.Terms(sid).SID)
+	if err != nil {
+		t.Fatalf("seat keys: %v", err)
+	}
+	if !lk.Public().IsEqual(logKey.PubKey()) {
+		t.Fatal("the key handed out is not this seat's log key")
+	}
+	if lk.Public().IsEqual(session.PubKey()) {
+		t.Fatal("the session key was handed to the game")
+	}
+
+	// And every seat's log public key is readable, or nothing could check
+	// what the others sign.
+	logs, ok := rt.LogSeats(sid)
+	if !ok || len(logs) != 2 {
+		t.Fatalf("the table reports %d log keys", len(logs))
+	}
+	mine := ourSeatOf(t, rt, sid)
+	if hex.EncodeToString(logs[mine]) != hex.EncodeToString(logKey.PubKey().SerializeCompressed()) {
+		t.Fatal("this seat's log key is not the one the table lists for it")
+	}
+}

@@ -3,7 +3,9 @@ package runtime
 import (
 	"context"
 
+	"github.com/karamble/dcrgaming-sdk/pkg/forfeit"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
+	"github.com/karamble/dcrgaming-sdk/pkg/gaming/wire"
 	"github.com/karamble/dcrgaming-sdk/pkg/ruling"
 )
 
@@ -19,18 +21,6 @@ type Chain struct {
 	Hash string
 }
 
-// Entry is one record from the signed log of a table, as a game reads it.
-//
-// The log is the runtime's to keep and hash-chain. A game reads it to decide
-// whether a duty was discharged; it never writes one directly, because an entry
-// that skipped the chain would be an entry nobody could prove.
-type Entry struct {
-	Seq  uint64
-	Seat uint32
-	Kind schema.Kind
-	Body []byte
-}
-
 // Game is the runtime as a game sees it: the things a game asks for, rather
 // than the things it is asked.
 //
@@ -38,8 +28,10 @@ type Entry struct {
 // without a bridge, which is the other half of shipping bridgetest.
 type Game interface {
 	// Send puts a message to the table. The runtime frames, chunks and
-	// routes it; the game decides what is in it.
-	Send(ctx context.Context, match string, kind schema.Kind, body any) error
+	// routes it; the game decides what is in it, and how long it is worth
+	// delivering - a move in a hand and a piece of evidence do not have the
+	// same life.
+	Send(ctx context.Context, match string, kind schema.Kind, body any, class wire.Class) error
 
 	// Settle declares who won, and the runtime builds and co-signs the
 	// payout from the table's own terms.
@@ -66,11 +58,19 @@ type Game interface {
 	// Chain is the tip, for a game running its own duty clocks.
 	Chain(ctx context.Context) (Chain, error)
 
-	// Log is the table's signed log so far, for the same reason.
-	Log(match string) []Entry
-
-	// Seats is the roster once a table has formed.
+	// Seats is the roster once a table has formed, and LogSeats the key
+	// each seat signs its own moves with.
 	Seats(match string) (map[uint32][]byte, bool)
+	LogSeats(match string) (map[uint32][]byte, bool)
+
+	// LogKey is this seat's own signing key, bound to the table. The one
+	// key a game is handed: it signs what the game says happened, where the
+	// session key holds the stake and stays with the runtime.
+	LogKey(match string) (*forfeit.LogKey, error)
+
+	// MatchID is what the table is called once it has decided who is at it,
+	// which is what a game's log and evidence are bound to.
+	MatchID(match string) (string, bool)
 }
 
 // Outcome is how a finished table's money is divided.
