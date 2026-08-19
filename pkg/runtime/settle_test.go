@@ -1,11 +1,18 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/decred/dcrd/wire"
+
+	"github.com/karamble/dcrgaming-sdk/pkg/escrow"
+	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
 )
 
 const stakeAtoms = 5_000_000
@@ -153,4 +160,269 @@ func TestASettlementIsBuiltInSeatOrder(t *testing.T) {
 			}
 		}
 	}
+}
+
+// The load-bearing check on the receiving side: a seat that could get the
+// others to sign a payout they had not computed themselves could pay itself the
+// table. So a proposal is rebuilt locally and compared before anything is
+// signed.
+func TestAPayoutThisPeerWouldNotHaveBuiltIsNotSigned(t *testing.T) {
+	_, rt, _ := stand(t, &trivialGame{})
+	sid, err := accept(rt, invite(t, nil), testGCID)
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	err = rt.adoptSettlement(context.Background(), sid, schema.Settle{
+		Tx: "00", Signer: "aa", Sigs: []string{"bb"},
+	})
+	if err == nil {
+		t.Fatal("adopted a payout from a stranger at an unseated table")
+	}
+}
+
+func TestAdoptingAPayoutRefusesTheObviouslyWrong(t *testing.T) {
+	_, rt, _ := stand(t, &trivialGame{})
+	sid, err := accept(rt, invite(t, nil), testGCID)
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		match string
+		body  schema.Settle
+	}{
+		{"a table this game is not at", "no-such-table", schema.Settle{}},
+		{"a signer that is not hex", sid, schema.Settle{Signer: "zz"}},
+		{"a transaction that is not hex", sid, schema.Settle{Signer: "aa", Tx: "zz"}},
+	} {
+		if err := rt.adoptSettlement(context.Background(), tc.match, tc.body); err == nil {
+			t.Errorf("%s: adopted", tc.name)
+		}
+	}
+}
+
+// Being short of a signature is not an error - the missing seat has not spoken
+// yet - and nothing is broadcast until everybody has.
+func TestAPayoutShortOfASignatureIsNotSent(t *testing.T) {
+	fake, rt, _ := stand(t, &trivialGame{})
+	tbl := fakeSeated(t, rt, 2)
+	tbl.settle = &settlement{
+		draft: escrow.SettleDraft{Inputs: []escrow.SettleInput{{Redeem: []byte{0x51}}}},
+		sigs:  map[string][][]byte{},
+	}
+	before := len(fake.Spends())
+	if err := rt.completeSettlement(context.Background(), tbl); err != nil {
+		// Members() on a nonsense redeem may refuse, which is also "not sent".
+		if !strings.Contains(err.Error(), "member") && !strings.Contains(err.Error(), "script") {
+			t.Fatalf("unexpected: %v", err)
+		}
+	}
+	if tbl.settle.done {
+		t.Fatal("a payout short of a signature was marked sent")
+	}
+	if len(fake.Spends()) != before {
+		t.Fatal("a payout short of a signature asked the bridge for money")
+	}
+}
+
+// A payout already sent is not sent twice.
+func TestAPayoutAlreadySentIsNotSentAgain(t *testing.T) {
+	_, rt, _ := stand(t, &trivialGame{})
+	tbl := fakeSeated(t, rt, 2)
+	tbl.settle = &settlement{done: true}
+	if err := rt.completeSettlement(context.Background(), tbl); err != nil {
+		t.Fatalf("completing a finished settlement: %v", err)
+	}
+}
+
+// theirSettle is the other seat signing the payout our side proposed.
+func theirSettle(t *testing.T, rt *Runtime, sid string, them *peer) schema.Settle {
+	t.Helper()
+	rt.mu.Lock()
+	s := rt.tables[sid].settle
+	rt.mu.Unlock()
+	if s == nil {
+		t.Fatal("our side proposed no payout")
+	}
+	sigs, err := escrow.SignSettlement(s.tx, s.draft, them.creds.Session)
+	if err != nil {
+		t.Fatalf("their signature: %v", err)
+	}
+	raw, err := s.tx.Bytes()
+	if err != nil {
+		t.Fatalf("serialise: %v", err)
+	}
+	mine, _ := them.form.OurSeat()
+	seats, _ := them.form.Seats()
+	// The other seat is whichever one is not ours.
+	var theirKey []byte
+	for seat, k := range seats {
+		if seat != ourSeatOf(t, rt, sid) {
+			theirKey = k
+		}
+	}
+	_ = mine
+	hexSigs := make([]string, 0, len(sigs))
+	for _, sig := range sigs {
+		hexSigs = append(hexSigs, hex.EncodeToString(sig))
+	}
+	return schema.Settle{
+		Tx: hex.EncodeToString(raw), Signer: hex.EncodeToString(theirKey), Sigs: hexSigs,
+	}
+}
+
+func ourSeatOf(t *testing.T, rt *Runtime, sid string) uint32 {
+	t.Helper()
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	seat, ok := rt.tables[sid].form.OurSeat()
+	if !ok {
+		t.Fatal("we have no seat")
+	}
+	return seat
+}
+
+// The whole path: both seats sign a payout they each computed, and it goes out.
+func TestATableBothSeatsAgreeOnIsPaidOut(t *testing.T) {
+	fake, rt, _ := stand(t, &trivialGame{})
+	sid, them := seatTwo(t, fake, rt)
+	fundBoth(t, fake, rt, sid, them)
+
+	pot := int64(stakeAtoms * 2)
+	winner := ourSeatOf(t, rt, sid)
+	shares := map[uint32]int64{winner: pot}
+	for seat := range mustSeats(t, rt, sid) {
+		if seat != winner {
+			shares[seat] = 0
+		}
+	}
+	if err := rt.Settle(context.Background(), sid, Outcome{Shares: shares}); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+	rt.mu.Lock()
+	sent := rt.tables[sid].settle.done
+	rt.mu.Unlock()
+	if sent {
+		t.Fatal("a payout went out with only one signature")
+	}
+
+	if err := rt.adoptSettlement(context.Background(), sid, theirSettle(t, rt, sid, them)); err != nil {
+		t.Fatalf("adopt: %v", err)
+	}
+	rt.mu.Lock()
+	sent = rt.tables[sid].settle.done
+	rt.mu.Unlock()
+	if !sent {
+		t.Fatal("a fully signed payout was not sent")
+	}
+	if len(fake.Spends()) != 0 {
+		t.Fatal("a settlement asked the bridge to spend rather than broadcasting")
+	}
+}
+
+// The check that stops a seat paying itself the table: a proposal is rebuilt
+// locally and compared before anything is signed.
+func TestAPayoutWithTamperedAmountsIsNotSigned(t *testing.T) {
+	fake, rt, _ := stand(t, &trivialGame{})
+	sid, them := seatTwo(t, fake, rt)
+	fundBoth(t, fake, rt, sid, them)
+
+	winner := ourSeatOf(t, rt, sid)
+	shares := map[uint32]int64{winner: stakeAtoms * 2}
+	for seat := range mustSeats(t, rt, sid) {
+		if seat != winner {
+			shares[seat] = 0
+		}
+	}
+	if err := rt.Settle(context.Background(), sid, Outcome{Shares: shares}); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+
+	body := theirSettle(t, rt, sid, them)
+	// Move a coin in the transaction they are asking us to agree with.
+	raw, err := hex.DecodeString(body.Tx)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	tx := wire.NewMsgTx()
+	if err := tx.Deserialize(bytes.NewReader(raw)); err != nil {
+		t.Fatalf("deserialise: %v", err)
+	}
+	tx.TxOut[0].Value -= 1000
+	tampered, err := tx.Bytes()
+	if err != nil {
+		t.Fatalf("serialise: %v", err)
+	}
+	body.Tx = hex.EncodeToString(tampered)
+
+	err = rt.adoptSettlement(context.Background(), sid, body)
+	if err == nil {
+		t.Fatal("signed a payout this peer would not have built")
+	}
+	if !strings.Contains(err.Error(), "would not have built") {
+		t.Fatalf("refused for the wrong reason: %v", err)
+	}
+	rt.mu.Lock()
+	sent := rt.tables[sid].settle.done
+	rt.mu.Unlock()
+	if sent {
+		t.Fatal("a tampered payout was sent")
+	}
+}
+
+// A signature from somebody who is not at the table is not a signature.
+func TestASignerWhoIsNotAtTheTableIsRefused(t *testing.T) {
+	fake, rt, _ := stand(t, &trivialGame{})
+	sid, them := seatTwo(t, fake, rt)
+	fundBoth(t, fake, rt, sid, them)
+	settleOurs(t, rt, sid)
+
+	body := theirSettle(t, rt, sid, them)
+	stranger := make([]byte, 33)
+	stranger[0] = 0x02
+	body.Signer = hex.EncodeToString(stranger)
+	if err := rt.adoptSettlement(context.Background(), sid, body); err == nil {
+		t.Fatal("took a signature from somebody who is not at this table")
+	}
+}
+
+// A payout over two inputs signed once is not a signed payout.
+func TestTheWrongNumberOfSignaturesIsRefused(t *testing.T) {
+	fake, rt, _ := stand(t, &trivialGame{})
+	sid, them := seatTwo(t, fake, rt)
+	fundBoth(t, fake, rt, sid, them)
+	settleOurs(t, rt, sid)
+
+	body := theirSettle(t, rt, sid, them)
+	body.Sigs = body.Sigs[:1]
+	err := rt.adoptSettlement(context.Background(), sid, body)
+	if err == nil {
+		t.Fatal("took a payout with too few signatures")
+	}
+	if !strings.Contains(err.Error(), "signatures") {
+		t.Fatalf("refused for the wrong reason: %v", err)
+	}
+}
+
+func settleOurs(t *testing.T, rt *Runtime, sid string) {
+	t.Helper()
+	winner := ourSeatOf(t, rt, sid)
+	shares := map[uint32]int64{winner: stakeAtoms * 2}
+	for seat := range mustSeats(t, rt, sid) {
+		if seat != winner {
+			shares[seat] = 0
+		}
+	}
+	if err := rt.Settle(context.Background(), sid, Outcome{Shares: shares}); err != nil {
+		t.Fatalf("settle: %v", err)
+	}
+}
+
+func mustSeats(t *testing.T, rt *Runtime, sid string) map[uint32][]byte {
+	t.Helper()
+	seats, ok := rt.Seats(sid)
+	if !ok {
+		t.Fatal("the table has no seats")
+	}
+	return seats
 }
