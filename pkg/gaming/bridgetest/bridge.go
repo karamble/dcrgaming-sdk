@@ -109,6 +109,8 @@ type Bridge struct {
 	replies []*gamingpb.RespondRequest
 	// frames is every frame a game has put on this bridge, in order.
 	frames []*gamingpb.Frame
+	// asks is where each subscriber's operator requests go.
+	asks map[string]chan *gamingpb.BridgeRequest
 
 	unreachable atomic.Bool
 	pushed      atomic.Int64
@@ -260,6 +262,28 @@ func (b *Bridge) Sent() []*gamingpb.Frame {
 	return append([]*gamingpb.Frame(nil), b.frames...)
 }
 
+// Ask puts one of the operator's requests to every game connected.
+//
+// The console is the only thing that can tell a game to accept an invitation,
+// set a payout or reclaim, so a test of any of those has to be able to be the
+// console. Without it the whole control surface is reachable only by a game
+// calling its own internals, which is a test of something nobody does.
+func (b *Bridge) Ask(req *gamingpb.BridgeRequest) int {
+	b.mu.Lock()
+	reqs := make([]chan *gamingpb.BridgeRequest, 0, len(b.asks))
+	for _, ch := range b.asks {
+		reqs = append(reqs, ch)
+	}
+	b.mu.Unlock()
+	for _, ch := range reqs {
+		select {
+		case ch <- req:
+		default:
+		}
+	}
+	return len(reqs)
+}
+
 // Broadcasts is every transaction this chain was asked to relay, and how many
 // times each was asked for. A test that cares about a transaction going out
 // once rather than twice reads this.
@@ -321,9 +345,19 @@ func (b *Bridge) Hello(_ context.Context, _ *gamingpb.HelloRequest) (*gamingpb.H
 func (b *Bridge) Subscribe(_ *gamingpb.SubscribeRequest, stream grpc.ServerStreamingServer[gamingpb.BridgeEvent]) error {
 	cn := callerCN(stream.Context())
 	ch := make(chan *gamingpb.Frame, 4096)
+	asks := make(chan *gamingpb.BridgeRequest, 64)
 	b.mu.Lock()
 	b.subs[cn] = ch
+	if b.asks == nil {
+		b.asks = map[string]chan *gamingpb.BridgeRequest{}
+	}
+	b.asks[cn] = asks
 	b.mu.Unlock()
+	defer func() {
+		b.mu.Lock()
+		delete(b.asks, cn)
+		b.mu.Unlock()
+	}()
 
 	if err := stream.Send(&gamingpb.BridgeEvent{
 		Event: &gamingpb.BridgeEvent_Start{Start: &gamingpb.StreamStart{Epoch: "e1"}},
@@ -337,6 +371,12 @@ func (b *Bridge) Subscribe(_ *gamingpb.SubscribeRequest, stream grpc.ServerStrea
 		case f := <-ch:
 			if err := stream.Send(&gamingpb.BridgeEvent{
 				Event: &gamingpb.BridgeEvent_Frame{Frame: f},
+			}); err != nil {
+				return err
+			}
+		case req := <-asks:
+			if err := stream.Send(&gamingpb.BridgeEvent{
+				Event: &gamingpb.BridgeEvent_Request{Request: req},
 			}); err != nil {
 				return err
 			}

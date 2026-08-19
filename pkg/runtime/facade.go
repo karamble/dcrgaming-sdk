@@ -55,8 +55,14 @@ type Game interface {
 	// rather than trying.
 	Reclaim(ctx context.Context, match string) error
 
-	// Chain is the tip, for a game running its own duty clocks.
+	// Chain is the tip, for a game running its own duty clocks, and
+	// BlockHash is what a past block hashed to, for a game anchoring its
+	// own moves in time.
 	Chain(ctx context.Context) (Chain, error)
+	BlockHash(ctx context.Context, height uint32) (string, error)
+
+	// Seat is which seat at a table is this peer's own.
+	Seat(match string) (uint32, bool)
 
 	// Seats is the roster once a table has formed, and LogSeats the key
 	// each seat signs its own moves with.

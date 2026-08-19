@@ -445,6 +445,30 @@ func (r *Runtime) Chain(ctx context.Context) (Chain, error) {
 	return Chain{Height: tip.Height, Hash: tip.Hash}, nil
 }
 
+// BlockHash is what a past block hashed to.
+//
+// A game anchors its own moves to blocks so that what it says happened can be
+// placed in time by anybody afterwards, and an anchor is only worth anything
+// if the hash it names can be checked. Reading is all this allows: nothing
+// here builds or broadcasts, and a game that could broadcast could pay
+// somebody.
+func (r *Runtime) BlockHash(ctx context.Context, height uint32) (string, error) {
+	return r.bridge.BlockHash(ctx, height)
+}
+
+// Seat is which seat at a table is this peer's own.
+//
+// A game needs it for almost everything it does - whose turn it is, whose
+// board is whose, who a move came from - and cannot work it out from Seats
+// alone, which says who is at the table and not which one is looking.
+func (r *Runtime) Seat(match string) (uint32, bool) {
+	t, err := r.tableOf(match)
+	if err != nil {
+		return 0, false
+	}
+	return t.form.OurSeat()
+}
+
 // Seats is a table's roster once it has formed.
 func (r *Runtime) Seats(match string) (map[uint32][]byte, bool) {
 	r.mu.Lock()
