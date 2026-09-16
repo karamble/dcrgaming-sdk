@@ -139,6 +139,24 @@ func (r *Runtime) acceptInvite(ctx context.Context, req *gamingpb.AcceptInvite) 
 
 // joinWhenBonded pays this table's seat bond and then joins with it.
 func (r *Runtime) joinWhenBonded(ctx context.Context, t *table) {
+	tip, err := r.bridge.ChainTip(ctx)
+	if err != nil {
+		r.log.Errorf("table %s: checking admission deadline: %v", t.match, err)
+		return
+	}
+	r.mu.Lock()
+	alreadyPaid := t.seatBond.outpoint != ""
+	r.mu.Unlock()
+	if tip.Height > int64(t.terms.Until) && !alreadyPaid {
+		r.mu.Lock()
+		t.recoveryOnly = true
+		t.recoveryReason = "admission expired"
+		r.mu.Unlock()
+		if err = r.keep(t); err != nil {
+			r.log.Errorf("table %s: retaining expired admission: %v", t.match, err)
+		}
+		return
+	}
 	if err := r.FundSeatBond(ctx, t.match); err != nil {
 		r.log.Errorf("table %s: the seat bond was not paid: %v", t.match, err)
 		return
@@ -162,7 +180,10 @@ func (r *Runtime) formAndJoin(ctx context.Context, t *table) error {
 	if err != nil {
 		return err
 	}
-	if tip.Height > int64(t.terms.Until) {
+	r.mu.Lock()
+	alreadyPaid := t.seatBond.outpoint != ""
+	r.mu.Unlock()
+	if tip.Height > int64(t.terms.Until) && !alreadyPaid {
 		r.mu.Lock()
 		t.recoveryOnly = true
 		t.recoveryReason = "admission expired"
@@ -181,7 +202,11 @@ func (r *Runtime) formAndJoin(ctx context.Context, t *table) error {
 	if err != nil {
 		return fmt.Errorf("form the table: %w", err)
 	}
-	if err = r.awaitAdmissionBond(ctx, t, form.Ours()); err != nil {
+	// The bridge has already located the exact bond output in the mempool or
+	// chain. Publish the signed join now so a full table cannot expire merely
+	// because its bonds are still gaining confirmations. Seating and every
+	// later financial step remain blocked until all bonds are confirmed.
+	if err = r.checkAdmissionBondAnnouncement(ctx, t.terms, form.Ours()); err != nil {
 		return err
 	}
 	r.mu.Lock()
@@ -337,6 +362,9 @@ func (r *Runtime) addJoin(ctx context.Context, match string, j *membership.Join)
 		return fmt.Errorf("a join arrived for a table this game is not at")
 	}
 	from := at(t)
+	if err = r.checkAdmissionBondAnnouncement(ctx, t.terms, j); err != nil {
+		return fmt.Errorf("verify announced admission bond: %w", err)
+	}
 	r.mu.Lock()
 	err = t.formation().AddJoin(j)
 	r.mu.Unlock()
@@ -403,6 +431,9 @@ func (r *Runtime) seatIfReady(ctx context.Context, match string) error {
 	}
 	if tip.Height < int64(want) {
 		return nil
+	}
+	if err := r.CheckAdmissionBonds(ctx, match); err != nil {
+		return fmt.Errorf("admission bonds are not confirmed: %w", err)
 	}
 	hash, err := r.bridge.BlockHash(ctx, want)
 	if err != nil {
@@ -492,6 +523,9 @@ func (r *Runtime) adoptRoster(ctx context.Context, match string, body schema.Ros
 					"that roster was computed under different terms; we read different invitations")
 			}
 			return fmt.Errorf("roster join %d: %w", i, err)
+		}
+		if err := r.checkAdmissionBondAnnouncement(ctx, terms, j); err != nil {
+			return fmt.Errorf("roster join %d bond: %w", i, err)
 		}
 		joins = append(joins, j)
 	}
@@ -758,6 +792,9 @@ func (r *Runtime) adoptResync(ctx context.Context, match string, body schema.Res
 		j, err := wj.Into()
 		if err != nil {
 			return fmt.Errorf("resync join %d: %w", i, err)
+		}
+		if err := r.checkAdmissionBondAnnouncement(ctx, t.terms, j); err != nil {
+			return fmt.Errorf("resync join %d bond: %w", i, err)
 		}
 		if err := t.formation().AddJoin(j); err != nil {
 			return fmt.Errorf("resync join %d: %w", i, err)

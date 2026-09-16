@@ -9,6 +9,7 @@ import (
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/gamingpb"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/wire"
+	"github.com/karamble/dcrgaming-sdk/pkg/membership"
 )
 
 const testGCID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -50,20 +51,68 @@ func TestAcceptingAnInvitationCreatesADurablePendingTableThenJoins(t *testing.T)
 	if !ok {
 		t.Fatal("no table was formed")
 	}
-	if tbl.formation() != nil {
-		t.Fatal("the game joined before its admission deposit was confirmed")
-	}
-	waitFor(t, "the admission deposit to confirm", func() bool {
-		if len(fake.Spends()) > 0 && fake.Height() < 802 {
-			fake.SetHeight(802)
-		}
-		return tbl.formation() != nil
+	waitFor(t, "the admission deposit to be announced", func() bool {
+		return len(fake.Spends()) > 0 && tbl.formation() != nil
 	})
 	if tbl.formation() == nil || tbl.formation().Ours() == nil {
 		t.Fatal("this seat has no join of its own")
 	}
+	if err := rt.checkAdmissionBond(context.Background(), tbl.terms, tbl.formation().Ours()); err == nil {
+		t.Fatal("an unconfirmed admission bond passed the readiness check")
+	}
+	fake.SetHeight(802)
+	if err := rt.checkAdmissionBond(context.Background(), tbl.terms, tbl.formation().Ours()); err != nil {
+		t.Fatalf("confirmed admission bond: %v", err)
+	}
 	if tbl.gcID != testGCID {
 		t.Fatalf("the table remembers group chat %q", tbl.gcID)
+	}
+}
+
+func TestAFullTableDoesNotExpireWhileAnnouncedBondsConfirm(t *testing.T) {
+	fake, rt, _ := stand(t, &trivialGame{})
+	sid, err := accept(rt, invite(t, nil), testGCID)
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	waitFor(t, "local bond announcement", func() bool {
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		return rt.tables[sid] != nil && rt.tables[sid].formation() != nil
+	})
+	rt.mu.Lock()
+	tbl := rt.tables[sid]
+	rt.mu.Unlock()
+
+	them := newPeer(t, tbl.terms)
+	_, pkScript, err := escrow.BondAddress(them.bond, rt.params)
+	if err != nil {
+		t.Fatalf("peer bond address: %v", err)
+	}
+	fake.Place(strings.Repeat("bb22cc33", 8), 1, pkScript, int64(tbl.terms.BondAtoms), 901)
+	if err = rt.addJoin(context.Background(), sid, them.form.Ours()); err != nil {
+		t.Fatalf("take peer bond announcement: %v", err)
+	}
+	if got := tbl.formation().State(); got != membership.Formed {
+		t.Fatalf("full table state is %s", got)
+	}
+
+	// Admission is closed, but the complete signed roster and both exact bond
+	// outputs were already known. One output has only one confirmation here.
+	fake.SetHeight(901)
+	rt.Tick(context.Background(), 901)
+	rt.mu.Lock()
+	recoveryOnly := tbl.recoveryOnly
+	rt.mu.Unlock()
+	if recoveryOnly || tbl.formation().State() == membership.Aborted {
+		t.Fatal("full table expired while its announced bond was confirming")
+	}
+	if err = rt.CheckAdmissionBonds(context.Background(), sid); err == nil {
+		t.Fatal("one-confirmation bond passed the readiness gate")
+	}
+	fake.SetHeight(902)
+	if err = rt.CheckAdmissionBonds(context.Background(), sid); err != nil {
+		t.Fatalf("confirmed roster bonds: %v", err)
 	}
 }
 

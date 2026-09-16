@@ -113,7 +113,11 @@ func seatTwo(t *testing.T, fake *bridgetest.Bridge, rt *Runtime) (string, *peer)
 	rt.mu.Unlock()
 
 	them := newPeer(t, tbl.formation().Terms())
-	fake.Place(strings.Repeat("bb22cc33", 8), 1, them.bond, int64(tbl.terms.BondAtoms), fake.Height()-1)
+	_, theirPkScript, err := escrow.BondAddress(them.bond, chaincfg.TestNet3Params())
+	if err != nil {
+		t.Fatalf("their bond address: %v", err)
+	}
+	fake.Place(strings.Repeat("bb22cc33", 8), 1, theirPkScript, int64(tbl.terms.BondAtoms), fake.Height()-1)
 	ours, theirs := tbl.formation().Ours(), them.form.Ours()
 	if ours == nil || theirs == nil {
 		t.Fatal("a seat has no join of its own")

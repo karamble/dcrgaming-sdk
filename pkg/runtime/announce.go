@@ -302,7 +302,18 @@ func (r *Runtime) Tick(ctx context.Context, height int64) {
 			continue
 		}
 		if pending {
-			r.startAdmission(t)
+			// A failed admission attempt is retried at most once per block.
+			// Retrying on every UI tick can exhaust the bridge financial
+			// limiter and prevent a corrected table from being created.
+			r.mu.Lock()
+			lastAttempt := t.saidAt
+			if height > lastAttempt {
+				t.saidAt = height
+			}
+			r.mu.Unlock()
+			if height > lastAttempt {
+				r.startAdmission(t)
+			}
 			// Still paying for its seat. Nothing to advance and
 			// nothing to repeat: it has said nothing yet.
 			continue

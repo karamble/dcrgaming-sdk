@@ -61,7 +61,20 @@ func (r *Runtime) Snapshot(match string) (TableSnapshot, error) {
 			out.Payments = append(out.Payments, rec)
 		}
 	}
-	if out.Record.SeatBond.Outpoint != "" {
+	if len(out.Record.Joins) > 0 {
+		for joinIndex, join := range out.Record.Joins {
+			seat := uint32(joinIndex)
+			for drawnSeat, key := range out.Seats {
+				if strings.EqualFold(key, join.Key) {
+					seat = drawnSeat
+					break
+				}
+			}
+			out.Deposits = append(out.Deposits, DepositStatus{Purpose: "seatbond", Seat: seat, Outpoint: join.BondOutpoint, Atoms: int64(out.Record.Terms.BondAtoms), RequiredConfirmations: int64(escrow.BondConfirmations), Check: "unchecked"})
+		}
+	} else if out.Record.SeatBond.Outpoint != "" {
+		// Before this player can publish its join, expose the locally paid
+		// bond so the preparation screen can show confirmation progress.
 		out.Deposits = append(out.Deposits, DepositStatus{Purpose: "seatbond", Outpoint: out.Record.SeatBond.Outpoint, Atoms: out.Record.SeatBond.Atoms, RequiredConfirmations: int64(escrow.BondConfirmations), Check: "unchecked"})
 	}
 	for _, group := range []struct {
@@ -160,10 +173,27 @@ func (r *Runtime) RefreshDeposits(ctx context.Context, match string) (TableSnaps
 		var script string
 		switch dep.Purpose {
 		case "seatbond":
-			redeem, e := r.seatBondScript(snap.Record.Terms)
-			err = e
-			if err == nil {
-				script, _, err = membership.PkScriptAndAddr(redeem, r.params)
+			var joined bool
+			for _, wireJoin := range snap.Record.Joins {
+				if wireJoin.BondOutpoint != dep.Outpoint {
+					continue
+				}
+				joined = true
+				var join *membership.Join
+				join, err = wireJoin.Into()
+				if err == nil {
+					var pkScript []byte
+					_, pkScript, err = escrow.BondAddress(join.Bond.Script, r.params)
+					script = hex.EncodeToString(pkScript)
+				}
+				break
+			}
+			if !joined {
+				var redeem []byte
+				redeem, err = r.seatBondScript(snap.Record.Terms)
+				if err == nil {
+					script, _, err = membership.PkScriptAndAddr(redeem, r.params)
+				}
 			}
 		case "stake":
 			var d deposit

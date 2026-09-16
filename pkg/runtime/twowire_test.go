@@ -129,6 +129,29 @@ func TestTwoRuntimesSeatEachOtherOverTheWire(t *testing.T) {
 	}
 }
 
+func TestSnapshotsExposeEverySeatsAdmissionBond(t *testing.T) {
+	p := seatedWirePair(t, nil)
+	for name, rt := range map[string]*Runtime{"one": p.one, "two": p.two} {
+		snapshot, err := rt.RefreshDeposits(p.ctx, p.sid)
+		if err != nil {
+			t.Fatalf("%s refreshing bonds: %v", name, err)
+		}
+		seen := map[uint32]bool{}
+		for _, deposit := range snapshot.Deposits {
+			if deposit.Purpose != "seatbond" {
+				continue
+			}
+			if deposit.Check != "verified" || deposit.Confirmations < deposit.RequiredConfirmations {
+				t.Fatalf("%s bond is not independently verified: %+v", name, deposit)
+			}
+			seen[deposit.Seat] = true
+		}
+		if len(seen) != 2 {
+			t.Fatalf("%s sees admission bonds for %d seats, want 2: %+v", name, len(seen), snapshot.Deposits)
+		}
+	}
+}
+
 func TestCooperativePayoutNeedsBothBridgeApprovals(t *testing.T) {
 	p := seatedWirePair(t, nil)
 	for name, rt := range map[string]*Runtime{"one": p.one, "two": p.two} {
