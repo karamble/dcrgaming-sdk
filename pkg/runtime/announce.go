@@ -266,22 +266,9 @@ func bytesEqual(a, b []byte) bool {
 	return hex.EncodeToString(a) == hex.EncodeToString(b)
 }
 
-// Tick moves every table on to a new chain height.
-//
-// Two things happen here, and both are the answer to the same fault: a message
-// said once on a lossy channel is a message that may never arrive.
-//
-// A stake is announced the moment it is paid, which is seconds after the
-// broadcast, when every peer still refuses it for want of a confirmation. Said
-// once, that is a message guaranteed to be refused and never repeated - the
-// table sits unfunded with the money already spent. So it is said again each
-// block, and only while somebody is still missing: a peer that already has it
-// ignores the repeat, so saying it again costs one small message and not
-// saying it costs a table that never funds.
-//
-// And a deadline that has passed is a fact about the chain, so the formation is
-// moved on when the height says so rather than when a message happens to
-// arrive.
+// Tick moves every table on to a new chain height. BR group-chat history is
+// durable, so chain polling advances deadlines and readiness without replaying
+// messages that were already published.
 func (r *Runtime) Tick(ctx context.Context, height int64) {
 	if height <= 0 {
 		return
@@ -302,20 +289,8 @@ func (r *Runtime) Tick(ctx context.Context, height int64) {
 			continue
 		}
 		if pending {
-			// A failed admission attempt is retried at most once per block.
-			// Retrying on every UI tick can exhaust the bridge financial
-			// limiter and prevent a corrected table from being created.
-			r.mu.Lock()
-			lastAttempt := t.saidAt
-			if height > lastAttempt {
-				t.saidAt = height
-			}
-			r.mu.Unlock()
-			if height > lastAttempt {
-				r.startAdmission(t)
-			}
-			// Still paying for its seat. Nothing to advance and
-			// nothing to repeat: it has said nothing yet.
+			// Admission starts when the invitation is accepted or restored.
+			// A chain tick must not repeat financial requests.
 			continue
 		}
 		r.tickTable(ctx, t, height)
@@ -337,85 +312,5 @@ func (r *Runtime) tickTable(ctx context.Context, t *table, height int64) {
 	}
 	if err := r.seatIfReady(ctx, t.match); err != nil {
 		r.log.Debugf("table %s: not seated yet: %v", t.match, err)
-	}
-	// Before anything else this block: an unanswered accusation costs the
-	// whole bond, and the window it has to be answered in is short.
-
-	r.mu.Lock()
-	said := t.saidAt
-	t.saidAt = height
-	r.mu.Unlock()
-	if height <= said {
-		// Once a block, not once a poll.
-		return
-	}
-	r.repeatAnnouncements(ctx, t)
-}
-
-// repeatFormation says again what this peer holds, and asks for what it does
-// not, while a table is still forming.
-//
-// Both halves, because they heal different directions. A roster this peer
-// published once, when it learned its last join, is the only thing that can
-// teach a peer which never received that join - it cannot ask for what it does
-// not know exists, so the roster has to be volunteered. A commit is asked for
-// by name, so for that direction the ask is enough.
-//
-// Volunteering is safe to repeat: a roster carries every join with its
-// signature, adopting one is idempotent, and a peer taught nothing publishes
-// nothing back, so the repeat cannot echo.
-func (r *Runtime) repeatFormation(ctx context.Context, t *table) {
-	switch t.formation().State() {
-	case membership.Joining:
-		if t.formation().WindowClosed() {
-			return
-		}
-		// A join is dropped by any peer that has not accepted the
-		// invitation yet: it names a table they are not at. Two peers
-		// joining seconds apart each drop the other's, and if a join is
-		// published only once they both sit holding one until the
-		// deadline ends a table they both wanted.
-		//
-		// Asking is enough to heal that, and asking is what happens: an
-		// ask names the joins this peer holds, so the other side
-		// answers with the one that went missing. Saying our own join
-		// again as well would be a second message every block for a
-		// round of latency.
-		r.say(ctx, t, "what we are missing", r.publishResync)
-	case membership.Formed, membership.Committed:
-		r.say(ctx, t, "what we hold", r.publishRoster)
-		r.say(ctx, t, "what we are missing", r.publishResync)
-	}
-}
-
-// repeatAnnouncements says again what this seat has already said, while
-// anybody is still short of it.
-func (r *Runtime) repeatAnnouncements(ctx context.Context, t *table) {
-	seats, ok := t.formation().Seats()
-	if !ok {
-		r.repeatFormation(ctx, t)
-		return
-	}
-	mine, ok := t.formation().OurSeat()
-	if !ok {
-		return
-	}
-	r.mu.Lock()
-	fundedAll := len(t.funded) == len(seats)
-	haveStake := t.funded[mine].outpoint != ""
-	paidAll := len(t.payouts) == len(seats)
-	r.mu.Unlock()
-	if haveStake && !fundedAll {
-		if err := r.announceFunded(ctx, t.match); err != nil {
-			r.log.Debugf("funding announcement pending: %v", err)
-		}
-	}
-	if !paidAll && r.PayoutFor(t.match) != "" {
-		if err := r.announcePayout(ctx, t.match); err != nil {
-			r.log.Debugf("payout destination announcement pending: %v", err)
-		}
-	}
-	if err := r.proposeSettlement(ctx, t); err != nil {
-		r.log.Debugf("bridge payout status unavailable: %v", err)
 	}
 }

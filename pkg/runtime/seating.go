@@ -652,8 +652,7 @@ func (r *Runtime) advance(ctx context.Context, t *table, from where) {
 }
 
 // say runs one of the publishing steps and logs rather than fails. Nothing
-// here is worth unwinding a formation over; the block repeat covers a message
-// that did not get out.
+// here is worth unwinding a formation over; BR retains every successful send.
 func (r *Runtime) say(ctx context.Context, t *table, what string, f func(context.Context, string) error) {
 	if err := f(ctx, t.match); err != nil {
 		r.log.Warnf("table %s: saying %s: %v", t.match, what, err)

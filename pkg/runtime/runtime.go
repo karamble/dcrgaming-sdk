@@ -135,9 +135,6 @@ type table struct {
 	// funded before there is a formation to ask.
 	terms membership.Terms
 
-	// saidAt is the height this table last repeated its announcements at,
-	// so they go out once a block rather than once a poll.
-	saidAt         int64
 	recoveryOnly   bool
 	recoveryReason string
 }

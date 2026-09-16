@@ -245,15 +245,13 @@ func TestAPayoutForTheWrongChainIsRefused(t *testing.T) {
 	}
 }
 
-// The first announcement goes out seconds after the broadcast, when every peer
-// still refuses it for want of a confirmation. Said once, that is a message
-// guaranteed to be refused and never repeated.
-func TestTheStakeIsSaidAgainUntilTheTableIsFunded(t *testing.T) {
+func TestChainTicksDoNotReplayPublishedState(t *testing.T) {
 	fake, rt, _ := stand(t, &trivialGame{})
-	sid, them := seatTwo(t, fake, rt)
+	sid, _ := seatTwo(t, fake, rt)
 	ctx := context.Background()
 
-	// This seat's stake is on the chain; the other's is not yet known.
+	// This seat's stake is known while the peer's is not. Chain progress must
+	// not replay it: BR history already contains the original announcement.
 	tbl, _ := rt.tableOf(sid)
 	mine, _ := tbl.formation().OurSeat()
 	dep, _ := rt.depositFor(tbl, mine)
@@ -262,39 +260,14 @@ func TestTheStakeIsSaidAgainUntilTheTableIsFunded(t *testing.T) {
 	fake.Place(ours, 0, script, stakeAtoms, fake.Height())
 	rt.mu.Lock()
 	tbl.funded = map[uint32]staked{mine: {outpoint: ours + ":0", atoms: stakeAtoms}}
-	// This test counts stake announcements. Mark payout destinations known so
-	// their independent retry loop does not affect that count.
-	tbl.payouts = map[uint32][]byte{0: {0x51}, 1: {0x51}}
 	rt.mu.Unlock()
 
 	at := fake.Height()
 	before := len(fake.Sent())
 	rt.Tick(ctx, at+1)
-	first := len(fake.Sent())
-	if first <= before {
-		t.Fatal("the stake was not said again while the table was short")
-	}
-	// Once a block, not once a poll.
-	rt.Tick(ctx, at+1)
-	if len(fake.Sent()) != first {
-		t.Fatalf("it was said twice at one height: %d then %d", first, len(fake.Sent()))
-	}
-	// A new block says it again.
 	rt.Tick(ctx, at+2)
-	second := len(fake.Sent())
-	if second <= first {
-		t.Fatal("it was not said again at the next block")
-	}
-
-	// Once everybody's stake is known, there is nobody left to tell.
-	outpoint := placeTheirStake(t, fake, rt, sid, them)
-	if err := rt.adoptFunded(ctx, sid, theirFunding(t, them, outpoint)); err != nil {
-		t.Fatalf("adopt: %v", err)
-	}
-	quiet := len(fake.Sent())
-	rt.Tick(ctx, at+3)
-	if len(fake.Sent()) != quiet {
-		t.Fatal("the stake was still being announced after the table was funded")
+	if len(fake.Sent()) != before {
+		t.Fatalf("chain ticks replayed %d message(s)", len(fake.Sent())-before)
 	}
 }
 
@@ -315,26 +288,10 @@ func TestATickAtNoHeightDoesNothing(t *testing.T) {
 	tbl.funded = map[uint32]staked{mine: {outpoint: ours + ":0", atoms: stakeAtoms}}
 	rt.mu.Unlock()
 
-	// A block first, so there is a marker to drag backwards.
-	rt.Tick(context.Background(), fake.Height()+1)
-	rt.mu.Lock()
-	marker := tbl.saidAt
-	rt.mu.Unlock()
-	if marker == 0 {
-		t.Fatal("the block was not marked, so this proves nothing")
-	}
-
 	before := len(fake.Sent())
 	rt.Tick(context.Background(), 0)
 	if len(fake.Sent()) != before {
 		t.Fatal("a tick at height zero sent something")
-	}
-	rt.mu.Lock()
-	after := tbl.saidAt
-	rt.mu.Unlock()
-	if after != marker {
-		t.Fatalf("a tick at no height moved the block marker from %d to %d; "+
-			"the next real block would say everything again", marker, after)
 	}
 }
 

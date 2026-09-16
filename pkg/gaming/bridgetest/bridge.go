@@ -357,6 +357,14 @@ func (b *Bridge) Subscribe(_ *gamingpb.SubscribeRequest, stream grpc.ServerStrea
 		b.asks = map[string]chan *gamingpb.BridgeRequest{}
 	}
 	b.asks[cn] = asks
+	// BR group-chat history is durable. Model it explicitly so reconnect
+	// tests never require peers to republish unchanged game state.
+	backlog := make([]*gamingpb.Frame, 0, len(b.frames))
+	for _, frame := range b.frames {
+		if frame.GetFrom() != cn {
+			backlog = append(backlog, frame)
+		}
+	}
 	b.mu.Unlock()
 	defer func() {
 		b.mu.Lock()
@@ -371,6 +379,13 @@ func (b *Bridge) Subscribe(_ *gamingpb.SubscribeRequest, stream grpc.ServerStrea
 		Event: &gamingpb.BridgeEvent_Start{Start: &gamingpb.StreamStart{Epoch: "e1"}},
 	}); err != nil {
 		return err
+	}
+	for _, frame := range backlog {
+		if err := stream.Send(&gamingpb.BridgeEvent{
+			Event: &gamingpb.BridgeEvent_Frame{Frame: frame},
+		}); err != nil {
+			return err
+		}
 	}
 	for {
 		select {
