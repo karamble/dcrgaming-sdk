@@ -3,7 +3,6 @@ package runtime
 import (
 	"context"
 
-	"github.com/karamble/dcrgaming-sdk/pkg/evidence"
 	"github.com/karamble/dcrgaming-sdk/pkg/forfeit"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/wire"
@@ -43,31 +42,6 @@ type Game interface {
 	// for - which today is all of them, but that is the script's statement
 	// and not this method's.
 	Settle(ctx context.Context, match string, out Outcome) error
-
-	// Seize spends a branch of a seat's forfeitable bond, using the key that
-	// seat's own signatures gave up.
-	//
-	// Nothing here is taken on the game's word, and nothing is verified from
-	// the game's evidence either: the bond was derived here from the roster,
-	// and a key that opens no branch of it is refused by escrow arithmetic
-	// before anything is built. A game whose cheating exposes no key has
-	// nothing for this to spend.
-	Seize(ctx context.Context, match string, seat uint32, exposed *evidence.Exposed) error
-
-	// Accuse opens the accusation chain against a seat that stopped
-	// answering, which takes nothing: it spends the accused's table bond
-	// into a claim they have an on-chain window to answer. The game says
-	// what was owed and when; the chain says whether it is late.
-	Accuse(ctx context.Context, match string, seat uint32, lapsed Lapsed) error
-
-	// Release hands this seat's own table bond back cooperatively, which is
-	// what a match ending with nothing to punish comes to.
-	Release(ctx context.Context, match string) error
-
-	// Reclaim pulls this seat's own locked money home once its timelock has
-	// matured. Safe to call early; it reports what is not yet claimable
-	// rather than trying.
-	Reclaim(ctx context.Context, match string) error
 
 	// Chain is the tip, for a game running its own duty clocks, and
 	// BlockHash is what a past block hashed to, for a game anchoring its

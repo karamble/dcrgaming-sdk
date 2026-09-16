@@ -190,97 +190,61 @@ func TestAJoinWithNoLogKeyIsRefused(t *testing.T) {
 	}
 }
 
-// A table bond has to name the whole table, or it is a bond nobody can take.
-//
-// This is the check that cannot be skipped: a bond naming the wrong roster holds
-// real coin, confirms on the chain, and looks identical from the outside to one
-// that could actually be claimed. Every peer derives its neighbours' bonds from
-// the roster it already agreed rather than believing what they announce, and
-// finds its own branch in each.
-func TestEverySeatsBondNamesTheWholeTable(t *testing.T) {
+// Every peer derives the same escrow using financial keys from signed bonds.
+func TestEveryDepositUsesTheFinancialRoster(t *testing.T) {
 	terms := testTerms(3)
-	privs := players(t, 3)
-	fs := settleAll(t, terms, privs)
-	for i, f := range fs {
+	fs := settleAll(t, terms, players(t, 3))
+	for _, f := range fs {
 		if err := f.SetBeacon(testBeacon()); err != nil {
-			t.Fatalf("peer %d beacon: %v", i, err)
+			t.Fatal(err)
 		}
 	}
-
-	var want []TableBond
-	for i, f := range fs {
-		bonds, err := f.TableBonds(testParams())
-		if err != nil {
-			t.Fatalf("peer %d: %v", i, err)
-		}
-		if len(bonds) != 3 {
-			t.Fatalf("peer %d derived %d bonds for 3 seats", i, len(bonds))
-		}
-		if want == nil {
-			want = bonds
-			continue
-		}
-		for j := range bonds {
-			if bonds[j] != want[j] {
-				t.Fatalf("peer %d and peer 0 derived different bonds for seat %d",
-					i, bonds[j].Seat)
-			}
-		}
-	}
-
-	seats, _ := fs[0].Seats()
-	for _, b := range want {
-		script, err := hex.DecodeString(b.ScriptHex)
-		if err != nil {
-			t.Fatalf("seat %d bond script: %v", b.Seat, err)
-		}
-		parsed, err := escrow.ParseTableBond(script)
-		if err != nil {
-			t.Fatalf("seat %d bond: %v", b.Seat, err)
-		}
-		if !bytes.Equal(parsed.Owner, seats[b.Seat]) {
-			t.Fatalf("seat %d's bond is owned by another key", b.Seat)
-		}
-		if len(parsed.Others) != 2 {
-			t.Fatalf("seat %d's bond can be taken by %d seats, want 2", b.Seat, len(parsed.Others))
-		}
-		// Every seat is a member, so each of them can help take it.
-		for seat, key := range seats {
-			if _, err := escrow.MemberIndex(parsed, key); err != nil {
-				t.Fatalf("seat %d is not a member of seat %d's bond: %v", seat, b.Seat, err)
-			}
-		}
-		// And the owner is not among the seats that can claim its own bond.
-		for _, other := range parsed.Others {
-			if bytes.Equal(other, seats[b.Seat]) {
-				t.Fatalf("seat %d can help claim its own bond", b.Seat)
-			}
-		}
-	}
-
-	// A key not at the table is in nobody's bond, so a bond derived from the
-	// wrong roster is caught rather than paid into.
-	strangers := players(t, 1)
-	script, err := hex.DecodeString(want[0].ScriptHex)
+	want, err := fs[0].Deposits(testParams())
 	if err != nil {
-		t.Fatalf("decode: %v", err)
+		t.Fatal(err)
 	}
-	parsed, err := escrow.ParseTableBond(script)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
+	for _, f := range fs[1:] {
+		got, err := f.Deposits(testParams())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != len(want) {
+			t.Fatal("different deposit count")
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatal("peers derived different deposits")
+			}
+		}
 	}
-	if _, err := escrow.MemberIndex(parsed, strangers[0].PubKey().SerializeCompressed()); err == nil {
-		t.Fatal("a key not at the table is a member of its bonds")
+	finances, ok := fs[0].FundingSeats()
+	if !ok {
+		t.Fatal("financial roster missing")
 	}
-}
-
-// A bond derived before the seating exists would name a membership that could
-// still change, which is a bond paid into for a table that never happened.
-func TestBondsWaitForTheSeating(t *testing.T) {
-	terms := testTerms(2)
-	privs := players(t, 2)
-	fs := settleAll(t, terms, privs)
-	if _, err := fs[0].TableBonds(testParams()); err == nil {
-		t.Fatal("bonds were derived before the seating was drawn")
+	identities, _ := fs[0].Seats()
+	for _, deposit := range want {
+		script, err := hex.DecodeString(deposit.RedeemScriptHex)
+		if err != nil {
+			t.Fatal(err)
+		}
+		members, err := escrow.Members(script)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(members) != len(finances) {
+			t.Fatal("incomplete financial roster")
+		}
+		for seat, key := range finances {
+			found := false
+			for _, member := range members {
+				found = found || bytes.Equal(key, member)
+				if bytes.Equal(identities[seat], member) {
+					t.Fatal("game identity has spending authority")
+				}
+			}
+			if !found {
+				t.Fatal("missing financial key")
+			}
+		}
 	}
 }

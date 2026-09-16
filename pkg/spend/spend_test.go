@@ -331,7 +331,7 @@ func TestBothGamesRecordsFitOneType(t *testing.T) {
 // transaction it made up. This pins the shape.
 func TestARecordNamesNoTransactionItBuilt(t *testing.T) {
 	want := map[string]bool{
-		"ID": true, "Match": true, "Seat": true, "Purpose": true,
+		"DepositID": true, "Obligation": true, "Attempt": true, "ID": true, "Match": true, "Seat": true, "Purpose": true,
 		"Address": true, "Atoms": true, "PkScript": true, "State": true,
 		"TxID": true, "Outpoint": true, "Error": true, "Unreachable": true,
 	}

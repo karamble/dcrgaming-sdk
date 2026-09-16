@@ -13,17 +13,17 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/decred/dcrd/dcrec"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/txscript/v4"
 	"github.com/decred/dcrd/txscript/v4/stdaddr"
+	"github.com/karamble/dcrgaming-sdk/pkg/finance"
 )
 
 const (
 	// MaxMembers caps a table at the referee's SNG/WTA seat limit. The
 	// settlement branch carries one key per member, so this also bounds the
 	// script size.
-	MaxMembers = 6
+	MaxMembers = finance.MaxMembers
 
 	// PubKeyLen is the length of a compressed secp256k1 public key.
 	PubKeyLen = 33
@@ -47,84 +47,18 @@ const (
 	scriptVersion = 0
 )
 
-// sigType selects secp256k1 Schnorr for OP_CHECKSIGALTVERIFY. The escrow has
-// to be Schnorr because settlement runs on adaptor signatures, and Decred has
-// no multisig opcode that accepts an alternative signature type — hence one
-// OP_CHECKSIGALTVERIFY per member rather than an OP_CHECKMULTISIG.
-const sigType = int64(dcrec.STSchnorrSecp256k1)
-
-// RedeemScript builds a depositor's escrow redeem script.
-//
-//	OP_IF
-//	  <member[0]> 2 OP_CHECKSIGALTVERIFY    one per member, canonical order
-//	  ...
-//	  OP_TRUE
-//	OP_ELSE
-//	  <csvBlocks> OP_CHECKSEQUENCEVERIFY OP_DROP
-//	  <owner> 2 OP_CHECKSIGALTVERIFY
-//	  OP_TRUE
-//	OP_ENDIF
-//
-// The settlement branch requires a signature from every table member, so a
-// depositor cannot move their own stake once it is funded: the only spends that
-// can ever satisfy it are transactions every member signed, which are the
-// settlement drafts agreed before the hand. Without that a losing player could
-// sweep their stake mid-hand and strand the settlement, since a signature over
-// one transaction says nothing about any other.
-//
-// The refund branch stays unilateral. Recovering your own funds after the CSV
-// timeout is the liveness backstop and must never depend on anyone else being
-// online or willing.
-//
-// owner must be one of members. Members may be passed in any order; they are
-// sorted canonically, and CanonicalMembers reports the order signatures must
-// then be supplied in.
+// RedeemScript derives the bridge-owned ECDSA cooperative/refund script.
 func RedeemScript(owner []byte, members [][]byte, csvBlocks uint32) ([]byte, error) {
-	if err := checkPubKey(owner); err != nil {
-		return nil, fmt.Errorf("owner key: %w", err)
-	}
-	if csvBlocks == 0 {
-		return nil, fmt.Errorf("csv blocks must be non-zero")
-	}
-	if csvBlocks > MaxCSVBlocks {
-		return nil, fmt.Errorf("csv blocks %d is beyond %d, so the refund branch could never be spent",
-			csvBlocks, MaxCSVBlocks)
-	}
-	sorted, err := CanonicalMembers(members)
-	if err != nil {
-		return nil, err
-	}
-	if !containsKey(sorted, owner) {
-		return nil, fmt.Errorf("owner key is not a table member")
-	}
+	return RecoveryRedeemScript(owner, members, owner, csvBlocks)
+}
 
-	b := txscript.NewScriptBuilder()
-	b.AddOp(txscript.OP_IF)
-	for _, m := range sorted {
-		b.AddData(m).
-			AddInt64(sigType).
-			AddOp(txscript.OP_CHECKSIGALTVERIFY)
+// RecoveryRedeemScript keeps cooperative signing keys separate from the
+// unilateral refund key. The latter may be held by the player's bridge.
+func RecoveryRedeemScript(owner []byte, members [][]byte, recovery []byte, csvBlocks uint32) ([]byte, error) {
+	if !bytes.Equal(owner, recovery) {
+		return nil, fmt.Errorf("financial owner must hold its refund key")
 	}
-	b.AddOp(txscript.OP_TRUE).
-		AddOp(txscript.OP_ELSE).
-		AddInt64(int64(csvBlocks)).
-		AddOp(txscript.OP_CHECKSEQUENCEVERIFY).
-		AddOp(txscript.OP_DROP).
-		AddData(owner).
-		AddInt64(sigType).
-		AddOp(txscript.OP_CHECKSIGALTVERIFY).
-		AddOp(txscript.OP_TRUE).
-		AddOp(txscript.OP_ENDIF)
-
-	script, err := b.Script()
-	if err != nil {
-		return nil, err
-	}
-	if len(script) > txscript.MaxScriptElementSize {
-		return nil, fmt.Errorf("redeem script is %d bytes, over the %d byte push limit",
-			len(script), txscript.MaxScriptElementSize)
-	}
-	return script, nil
+	return finance.CooperativeScript(owner, members, csvBlocks)
 }
 
 // CanonicalMembers returns members sorted by compressed key bytes. The order
@@ -162,7 +96,7 @@ func MemberCount(redeem []byte) (int, error) {
 	n := 0
 	for tokenizer.Next() {
 		switch tokenizer.Opcode() {
-		case txscript.OP_CHECKSIGALTVERIFY:
+		case txscript.OP_CHECKSIGVERIFY:
 			n++
 		case txscript.OP_ELSE:
 			if err := tokenizer.Err(); err != nil {
@@ -196,7 +130,7 @@ func Members(redeem []byte) ([][]byte, error) {
 		switch tokenizer.Opcode() {
 		case txscript.OP_DATA_33:
 			pending = tokenizer.Data()
-		case txscript.OP_CHECKSIGALTVERIFY:
+		case txscript.OP_CHECKSIGVERIFY:
 			if len(pending) != PubKeyLen {
 				return nil, fmt.Errorf("signature check %d is not preceded by a key", len(keys))
 			}
@@ -213,49 +147,6 @@ func Members(redeem []byte) ([][]byte, error) {
 		return nil, fmt.Errorf("parse redeem script: %w", err)
 	}
 	return nil, fmt.Errorf("redeem script has no refund branch")
-}
-
-// SettlementSigScript builds the signature script that spends the settlement
-// branch. sigs are indexed as CanonicalMembers reports, one per member.
-//
-// Each OP_CHECKSIGALTVERIFY consumes the signature on top of the stack, and the
-// script checks members in ascending canonical order, so the signatures are
-// pushed in reverse: the last member's goes on first and ends up deepest.
-func SettlementSigScript(redeem []byte, sigs [][]byte) ([]byte, error) {
-	want, err := MemberCount(redeem)
-	if err != nil {
-		return nil, err
-	}
-	if len(sigs) != want {
-		return nil, fmt.Errorf("got %d signatures, redeem script requires %d", len(sigs), want)
-	}
-	for i, sig := range sigs {
-		if len(sig) != SigLen {
-			return nil, fmt.Errorf("signature %d is %d bytes, want %d", i, len(sig), SigLen)
-		}
-	}
-
-	b := txscript.NewScriptBuilder()
-	for i := len(sigs) - 1; i >= 0; i-- {
-		b.AddData(sigs[i])
-	}
-	b.AddOp(txscript.OP_1) // select the settlement branch
-	b.AddData(redeem)
-	return b.Script()
-}
-
-// RefundSigScript builds the signature script that spends the refund branch
-// once CSV has matured. The spending input's sequence must satisfy the
-// script's relative timelock.
-func RefundSigScript(redeem, ownerSig []byte) ([]byte, error) {
-	if len(ownerSig) != SigLen {
-		return nil, fmt.Errorf("signature is %d bytes, want %d", len(ownerSig), SigLen)
-	}
-	b := txscript.NewScriptBuilder()
-	b.AddData(ownerSig)
-	b.AddOp(txscript.OP_0) // select the refund branch
-	b.AddData(redeem)
-	return b.Script()
 }
 
 // Address returns the P2SH address a redeem script's deposits are paid to,

@@ -54,6 +54,11 @@ func (r *Runtime) AcceptInvite(ctx context.Context, link, gcid string) (string, 
 }
 
 func (r *Runtime) acceptInvite(ctx context.Context, req *gamingpb.AcceptInvite) (string, error) {
+	r.admissionMu.Lock()
+	defer r.admissionMu.Unlock()
+	if err := r.healthy(); err != nil {
+		return "", err
+	}
 	gcid := strings.ToLower(strings.TrimSpace(req.GetGcid()))
 	if !gcID.MatchString(gcid) {
 		return "", fmt.Errorf("a group chat id is 64 hex characters")
@@ -73,7 +78,7 @@ func (r *Runtime) acceptInvite(ctx context.Context, req *gamingpb.AcceptInvite) 
 		return "", fmt.Errorf("that invitation names no session")
 	}
 
-	terms, err := r.termsFor(inv)
+	terms, err := r.resolveInvite(ctx, inv)
 	if err != nil {
 		return "", err
 	}
@@ -83,26 +88,52 @@ func (r *Runtime) acceptInvite(ctx context.Context, req *gamingpb.AcceptInvite) 
 		r.mu.Unlock()
 		return "", fmt.Errorf("this session already ended: %s", why)
 	}
-	if _, seen := r.tables[inv.SID]; seen {
+	if old, seen := r.tables[inv.SID]; seen {
 		r.mu.Unlock()
+		if old.terms != terms || old.gcID != gcid {
+			return "", fmt.Errorf("session already accepted with different terms or group chat")
+		}
 		// Accepting twice is not an error. An operator pressing the
 		// button again, or a retried request, gets the same answer.
 		return inv.SID, nil
 	}
+	r.mu.Unlock()
+	tip, err := r.bridge.ChainTip(ctx)
+	if err != nil {
+		return "", err
+	}
+	if tip.Height > int64(terms.Until) {
+		return "", fmt.Errorf("admission deadline passed")
+	}
 	t := &table{match: inv.SID, gcID: gcid, terms: terms}
+	{
+		authority, err := r.bridge.FinancialAuthority(ctx, inv.SID)
+		if err != nil {
+			return "", err
+		}
+		pub := authority.GetPublicKey()
+		t.bridgePayout = authority.GetPayoutAddress()
+		if _, err := payScriptFor(t.bridgePayout, r.params); err != nil {
+			return "", fmt.Errorf("invalid bridge payout destination: %w", err)
+		}
+		key, err := hex.DecodeString(pub)
+		if err != nil || len(key) != 33 {
+			return "", fmt.Errorf("bridge returned an invalid spending key")
+		}
+		if _, err = secp256k1.ParsePubKey(key); err != nil {
+			return "", err
+		}
+		t.bridgeKey = pub
+	}
+	if err := r.keep(t); err != nil {
+		return "", err
+	}
+	r.mu.Lock()
 	r.tables[inv.SID] = t
 	r.mu.Unlock()
 
-	if r.bondScope == BondPerTable {
-		// The bond has to exist before the join that names it, and
-		// paying it waits on a person. So the table is registered now,
-		// visible and answering, and joins when its bond lands.
-		go r.joinWhenBonded(r.runCtx, t)
-		return inv.SID, nil
-	}
-	if err := r.formAndJoin(ctx, t); err != nil {
-		return "", err
-	}
+	// Register before approval so the game can display pending seating.
+	r.startAdmission(t)
 	return inv.SID, nil
 }
 
@@ -119,6 +150,29 @@ func (r *Runtime) joinWhenBonded(ctx context.Context, t *table) {
 
 // formAndJoin builds this seat's credentials, forms the table and says so.
 func (r *Runtime) formAndJoin(ctx context.Context, t *table) error {
+	t.formMu.Lock()
+	defer t.formMu.Unlock()
+	r.mu.Lock()
+	existing := t.formation() != nil
+	r.mu.Unlock()
+	if existing {
+		return nil
+	}
+	tip, err := r.bridge.ChainTip(ctx)
+	if err != nil {
+		return err
+	}
+	if tip.Height > int64(t.terms.Until) {
+		r.mu.Lock()
+		t.recoveryOnly = true
+		t.recoveryReason = "admission expired"
+		r.mu.Unlock()
+		if err := r.keep(t); err != nil {
+			return err
+		}
+		return fmt.Errorf("admission expired; deposit retained for recovery")
+	}
+
 	creds, err := r.seatCredentials(t, t.terms)
 	if err != nil {
 		return err
@@ -127,28 +181,25 @@ func (r *Runtime) formAndJoin(ctx context.Context, t *table) error {
 	if err != nil {
 		return fmt.Errorf("form the table: %w", err)
 	}
+	if err = r.awaitAdmissionBond(ctx, t, form.Ours()); err != nil {
+		return err
+	}
 	r.mu.Lock()
-	t.form = form
+	t.setFormation(form)
 	r.mu.Unlock()
 
-	r.keep(t)
+	if err := r.keep(t); err != nil {
+		return err
+	}
 	return r.publishJoin(ctx, t.match)
 }
 
-// termsFor composes the table's terms from the invitation and the game.
-//
-// The invitation decides everything it states, and the game fills in only what
-// it left out. That split matters: an invitation is ordinary chat text, so
-// whoever forwards it could hand one player one buy-in and another a different
-// one, and winner-take-all divides a pot fairly only across equal stakes. Two
-// players who read different invitations must fail to form a table rather than
-// form one and discover it at settlement. Letting the game override a stated
-// field would be exactly that failure, so a game that disagrees refuses instead.
-//
-// What the invitation cannot state is the bond, because schema.Invite has no
-// field for one. Those come from the game, and both seats reach the same values
-// by running the same game.
+// termsFor copies the operator's advertised economics without substituting
+// game defaults. A game may reject terms it does not support.
 func (r *Runtime) termsFor(inv schema.Invite) (membership.Terms, error) {
+	if inv.TableBondAtoms != 0 || inv.TableBondBlocks != 0 {
+		return membership.Terms{}, fmt.Errorf("additional table bonds are not supported by this runtime")
+	}
 	want, err := r.rules.Terms(inv.SID)
 	if err != nil {
 		return membership.Terms{}, fmt.Errorf("this game will not sit at that table: %w", err)
@@ -160,14 +211,17 @@ func (r *Runtime) termsFor(inv schema.Invite) (membership.Terms, error) {
 		into    func()
 	}{
 		{"buy-in", inv.BuyInAtoms, want.BuyInAtoms, func() { want.BuyInAtoms = inv.BuyInAtoms }},
+		{"admission bond", inv.AdmissionAtoms, want.BondAtoms, func() { want.BondAtoms = inv.AdmissionAtoms }},
+		{"admission bond delay", uint64(inv.AdmissionBlocks), uint64(want.BondLockBlocks), func() { want.BondLockBlocks = inv.AdmissionBlocks }},
 		{"seat count", uint64(inv.Seats), uint64(want.Seats), func() { want.Seats = inv.Seats }},
 		{"refund timelock", uint64(inv.CSVBlocks), uint64(want.CSVBlocks), func() { want.CSVBlocks = inv.CSVBlocks }},
 		{"admission deadline", uint64(inv.Until), uint64(want.Until), func() { want.Until = inv.Until }},
 	} {
 		if c.invited == 0 {
-			continue // the invitation states nothing; the game decides
+			return membership.Terms{}, fmt.Errorf("invitation omits %s", c.what)
 		}
-		if c.game != 0 && c.game != c.invited {
+		_, resolves := r.rules.(InviteResolver)
+		if !resolves && c.game != 0 && c.game != c.invited {
 			return membership.Terms{}, fmt.Errorf(
 				"the invitation states a %s of %d and this game plays %d",
 				c.what, c.invited, c.game)
@@ -175,6 +229,9 @@ func (r *Runtime) termsFor(inv schema.Invite) (membership.Terms, error) {
 		c.into()
 	}
 	want.Game, want.SID = inv.Game, inv.SID
+	if _, resolves := r.rules.(InviteResolver); resolves {
+		return want, nil
+	}
 	if err := want.Validate(); err != nil {
 		return membership.Terms{}, fmt.Errorf("that invitation states no table this game can sit at: %w", err)
 	}
@@ -201,7 +258,7 @@ func (r *Runtime) seatCredentials(t *table, terms membership.Terms) (membership.
 	if err != nil {
 		return membership.Credentials{}, err
 	}
-	script, err := r.seatBondScript(terms)
+	script, err := r.bondScriptFor(terms, t.bridgeKey)
 	if err != nil {
 		return membership.Credentials{}, err
 	}
@@ -214,6 +271,9 @@ func (r *Runtime) seatCredentials(t *table, terms membership.Terms) (membership.
 // seatKeys derives the two per-table keys. The bond is not among them; see
 // seatCredentials.
 func (r *Runtime) seatKeys(sid string) (session, logKey *secp256k1.PrivateKey, err error) {
+	if err = r.healthy(); err != nil {
+		return nil, nil, err
+	}
 	if session, err = r.identity.DeriveKey(r.seatTags.Session, sid); err != nil {
 		return nil, nil, fmt.Errorf("derive this seat's session key: %w", err)
 	}
@@ -231,7 +291,7 @@ func (r *Runtime) publishJoin(ctx context.Context, match string) error {
 	if !ok {
 		return fmt.Errorf("no table %q", match)
 	}
-	join := t.form.Ours()
+	join := t.formation().Ours()
 	if join == nil {
 		return fmt.Errorf("this seat has no join to publish")
 	}
@@ -240,6 +300,15 @@ func (r *Runtime) publishJoin(ctx context.Context, match string) error {
 
 // send puts one message to a table's group chat.
 func (r *Runtime) send(ctx context.Context, t *table, kind schema.Kind, body any) error {
+	r.mu.Lock()
+	recovery := t.recoveryOnly
+	r.mu.Unlock()
+	if recovery {
+		return fmt.Errorf("table is retained for recovery only")
+	}
+	if err := r.healthy(); err != nil {
+		return err
+	}
 	return r.router.Send(ctx, t.gCID(), t.match, t.match, kind, body, classOf(kind))
 }
 
@@ -269,7 +338,7 @@ func (r *Runtime) addJoin(ctx context.Context, match string, j *membership.Join)
 	}
 	from := at(t)
 	r.mu.Lock()
-	err = t.form.AddJoin(j)
+	err = t.formation().AddJoin(j)
 	r.mu.Unlock()
 	if err != nil {
 		return err
@@ -290,7 +359,7 @@ func (r *Runtime) addCommit(ctx context.Context, match string, c *membership.Com
 	}
 	from := at(t)
 	r.mu.Lock()
-	err = t.form.AddCommit(c)
+	err = t.formation().AddCommit(c)
 	r.mu.Unlock()
 	if err != nil {
 		return err
@@ -312,7 +381,10 @@ func (r *Runtime) seatIfReady(ctx context.Context, match string) error {
 	if !ok {
 		return fmt.Errorf("no table %q", match)
 	}
-	if t.form.Seated() {
+	if t.formation() == nil {
+		return ErrNotSeated
+	}
+	if t.formation().Seated() {
 		return nil
 	}
 	// Admission is not shut here. Closing it short of a full table aborts
@@ -320,11 +392,11 @@ func (r *Runtime) seatIfReady(ctx context.Context, match string) error {
 	// abort the moment the first join reached it, before the second player
 	// had any chance to answer. The deadline shuts admission, in Tick, at a
 	// height everybody reads the same way.
-	if !t.form.Agreed() {
+	if !t.formation().Agreed() {
 		return nil
 	}
 
-	want := t.form.BeaconHeight()
+	want := t.formation().BeaconHeight()
 	tip, err := r.bridge.ChainTip(ctx)
 	if err != nil {
 		return err
@@ -340,11 +412,11 @@ func (r *Runtime) seatIfReady(ctx context.Context, match string) error {
 	if err != nil {
 		return fmt.Errorf("the bridge gave a block hash that is not hex: %w", err)
 	}
-	if err := t.form.SetBeacon(raw); err != nil {
+	if err := t.formation().SetBeacon(raw); err != nil {
 		return err
 	}
 
-	seats, _ := t.form.Seats()
+	seats, _ := t.formation().Seats()
 	r.mu.Lock()
 	t.seats = seats
 	r.mu.Unlock()
@@ -354,11 +426,7 @@ func (r *Runtime) seatIfReady(ctx context.Context, match string) error {
 
 	// Announce before the game is told, so a game that starts play on Seated
 	// finds the exchange already under way.
-	if len(r.punishTag) > 0 {
-		if err := r.announcePunishKey(ctx, match); err != nil {
-			r.log.Warnf("table %s: announcing a punishment key: %v", match, err)
-		}
-	}
+
 	if h, ok := r.rules.(Seated); ok {
 		h.Seated(ctx, match, seats)
 	}
@@ -387,14 +455,14 @@ func (r *Runtime) publishRoster(ctx context.Context, match string) error {
 		return err
 	}
 	var assertion *membership.Assertion
-	if a, err := t.form.Assertion(); err == nil {
+	if a, err := t.formation().Assertion(); err == nil {
 		assertion = a
 	}
 	seats := map[uint32][]byte{}
-	if s, ok := t.form.Seats(); ok {
+	if s, ok := t.formation().Seats(); ok {
 		seats = s
 	}
-	body := schema.RosterFrom(t.form.Terms(), seats, t.form.Joins(), assertion)
+	body := schema.RosterFrom(t.formation().Terms(), seats, t.formation().Joins(), assertion)
 	return r.send(ctx, t, KindRoster, body)
 }
 
@@ -408,7 +476,7 @@ func (r *Runtime) adoptRoster(ctx context.Context, match string, body schema.Ros
 	if err != nil {
 		return err
 	}
-	terms := t.form.Terms()
+	terms := t.formation().Terms()
 	joins := make([]*membership.Join, 0, len(body.Joins))
 	for i, wj := range body.Joins {
 		j, err := wj.Into()
@@ -433,15 +501,15 @@ func (r *Runtime) adoptRoster(ctx context.Context, match string, body schema.Ros
 		return err
 	}
 	from := at(t)
-	agreed := t.form.Agreed()
+	agreed := t.formation().Agreed()
 	if assertion != nil {
-		if err := t.form.AddAssertion(assertion, joins); err != nil {
+		if err := t.formation().AddAssertion(assertion, joins); err != nil {
 			return err
 		}
 	} else {
 		// A roster with no claim is just a carrier for joins.
 		for _, j := range joins {
-			if err := t.form.AddJoin(j); err != nil {
+			if err := t.formation().AddJoin(j); err != nil {
 				return err
 			}
 		}
@@ -457,7 +525,7 @@ func (r *Runtime) adoptRoster(ctx context.Context, match string, body schema.Ros
 	// it is the thing the other side is waiting to hear. A roster that
 	// changes neither is not answered, so two peers that already agree fall
 	// silent instead of answering each other forever.
-	if t.form.Agreed() != agreed {
+	if t.formation().Agreed() != agreed {
 		r.say(ctx, t, "what we hold", r.publishRoster)
 	}
 	r.advance(ctx, t, from)
@@ -479,7 +547,7 @@ type where struct {
 }
 
 func at(t *table) where {
-	return where{state: t.form.State(), joins: len(t.form.Joins())}
+	return where{state: t.formation().State(), joins: len(t.formation().Joins())}
 }
 
 // advance moves a table on from wherever it was, and says what that means to
@@ -490,10 +558,10 @@ func at(t *table) where {
 // changes state, and somebody has to notice and answer. That somebody used to
 // be nobody, which is why no table could form.
 func (r *Runtime) advance(ctx context.Context, t *table, from where) {
-	learned := len(t.form.Joins()) > from.joins
-	moved := t.form.State() != from.state
+	learned := len(t.formation().Joins()) > from.joins
+	moved := t.formation().State() != from.state
 
-	switch t.form.State() {
+	switch t.formation().State() {
 	case membership.Joining:
 		if learned {
 			// What heals a channel that loses messages: a peer that
@@ -516,8 +584,8 @@ func (r *Runtime) advance(ctx context.Context, t *table, from where) {
 		// straggler exists, only the deadline does, but it does mean
 		// every member has seen exactly this set. What is left is a
 		// race that resolves to no game, never to two tables.
-		if t.form.Agreed() || t.form.WindowClosed() {
-			c, err := t.form.Bind()
+		if t.formation().Agreed() || t.formation().WindowClosed() {
+			c, err := t.formation().Bind()
 			if err != nil {
 				r.log.Errorf("table %s: binding: %v", t.match, err)
 				return
@@ -528,7 +596,7 @@ func (r *Runtime) advance(ctx context.Context, t *table, from where) {
 			}
 			// Binding may have finished the table on its own, if
 			// everybody else's commit arrived first.
-			r.advance(ctx, t, where{state: membership.Formed, joins: len(t.form.Joins())})
+			r.advance(ctx, t, where{state: membership.Formed, joins: len(t.formation().Joins())})
 		}
 
 	case membership.Committed:
@@ -543,7 +611,7 @@ func (r *Runtime) advance(ctx context.Context, t *table, from where) {
 
 	case membership.Aborted:
 		if moved {
-			r.log.Warnf("table %s did not form: %s", t.match, t.form.Reason())
+			r.log.Warnf("table %s did not form: %s", t.match, t.formation().Reason())
 			r.keep(t)
 		}
 	}
@@ -575,7 +643,10 @@ func (r *Runtime) Resync(ctx context.Context) {
 	r.mu.Unlock()
 
 	for _, t := range tables {
-		if t.form.State() == membership.Aborted {
+		r.mu.Lock()
+		skip := t.formation() == nil || t.recoveryOnly
+		r.mu.Unlock()
+		if skip || t.formation().State() == membership.Aborted {
 			continue
 		}
 		r.say(ctx, t, "what we are missing", r.publishResync)
@@ -599,10 +670,10 @@ func (r *Runtime) publishResync(ctx context.Context, match string) error {
 // every peer.
 func resyncAsk(t *table) schema.Resync {
 	ask := schema.Resync{}
-	for _, j := range t.form.Joins() {
+	for _, j := range t.formation().Joins() {
 		ask.Joins = append(ask.Joins, hex.EncodeToString(j.Key))
 	}
-	for _, c := range t.form.Commits() {
+	for _, c := range t.formation().Commits() {
 		ask.Commits = append(ask.Commits, hex.EncodeToString(c.Signer))
 	}
 	return ask
@@ -617,6 +688,27 @@ func (r *Runtime) answerResync(ctx context.Context, match string, ask schema.Res
 	t, err := r.tableOf(match)
 	if err != nil {
 		return err
+	}
+	// A peer can miss a payout or funding announcement after the roster
+	// completed. Resend our authenticated financial announcements on request,
+	// even when our own view is complete. This does not request any new spend.
+	if mine, seated := t.formation().OurSeat(); seated {
+		r.mu.Lock()
+		haveStake := t.funded[mine].outpoint != ""
+		r.mu.Unlock()
+		if haveStake {
+			if err := r.announceFunded(ctx, match); err != nil {
+				return err
+			}
+		}
+		if r.PayoutFor(match) != "" {
+			if err := r.announcePayout(ctx, match); err != nil {
+				return err
+			}
+		}
+		if err := r.proposeSettlement(ctx, t); err != nil {
+			return err
+		}
 	}
 	reply := resyncDiff(t, ask)
 	if len(reply.Joins) == 0 && len(reply.Commits) == 0 {
@@ -637,12 +729,12 @@ func resyncDiff(t *table, ask schema.Resync) schema.ResyncReply {
 	hasJoin, hasCommit := named(ask.Joins), named(ask.Commits)
 
 	var reply schema.ResyncReply
-	for _, j := range t.form.Joins() {
+	for _, j := range t.formation().Joins() {
 		if _, ok := hasJoin[hex.EncodeToString(j.Key)]; !ok {
 			reply.Joins = append(reply.Joins, schema.JoinFrom(j))
 		}
 	}
-	for _, c := range t.form.Commits() {
+	for _, c := range t.formation().Commits() {
 		if _, ok := hasCommit[hex.EncodeToString(c.Signer)]; !ok {
 			reply.Commits = append(reply.Commits, schema.CommitFrom(c))
 		}
@@ -667,7 +759,7 @@ func (r *Runtime) adoptResync(ctx context.Context, match string, body schema.Res
 		if err != nil {
 			return fmt.Errorf("resync join %d: %w", i, err)
 		}
-		if err := t.form.AddJoin(j); err != nil {
+		if err := t.formation().AddJoin(j); err != nil {
 			return fmt.Errorf("resync join %d: %w", i, err)
 		}
 	}
@@ -676,7 +768,7 @@ func (r *Runtime) adoptResync(ctx context.Context, match string, body schema.Res
 		if err != nil {
 			return fmt.Errorf("resync commit %d: %w", i, err)
 		}
-		if err := t.form.AddCommit(c); err != nil {
+		if err := t.formation().AddCommit(c); err != nil {
 			return fmt.Errorf("resync commit %d: %w", i, err)
 		}
 	}

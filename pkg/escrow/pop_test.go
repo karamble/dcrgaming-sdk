@@ -10,7 +10,7 @@ const testOutpoint = "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3
 
 func bondFor(t *testing.T, priv *secp256k1.PrivateKey) []byte {
 	t.Helper()
-	bond, err := BondScript(priv.PubKey().SerializeCompressed(), MinBondBlocks)
+	bond, err := testBondScript(priv.PubKey().SerializeCompressed(), MinBondBlocks)
 	if err != nil {
 		t.Fatalf("bond script: %v", err)
 	}

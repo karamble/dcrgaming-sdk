@@ -3,6 +3,7 @@ package runtime
 import (
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
 	"github.com/karamble/dcrgaming-sdk/pkg/membership"
+	"github.com/karamble/dcrgaming-sdk/pkg/spend"
 )
 
 // Tables have to survive a restart, and this is where they are kept.
@@ -36,8 +38,14 @@ import (
 // come back with no bond terms, hash to something else, and refuse every commit
 // it had already collected.
 type TableRecord struct {
-	Match string `json:"match"`
-	GCID  string `json:"gcid"`
+	BridgePayout   string `json:"bridgePayout"`
+	PayoutID       string `json:"payoutID,omitempty"`
+	BridgeKey      string `json:"bridgeKey,omitempty"`
+	Version        uint32 `json:"version,omitempty"`
+	RecoveryOnly   bool   `json:"recoveryOnly,omitempty"`
+	RecoveryReason string `json:"recoveryReason,omitempty"`
+	Match          string `json:"match"`
+	GCID           string `json:"gcid"`
 
 	Terms   membership.Terms `json:"terms"`
 	Joins   []schema.Join    `json:"joins,omitempty"`
@@ -57,12 +65,9 @@ type TableRecord struct {
 	// forfeitable bond each land in their own output.
 	// SeatBond is what this seat's join binds to, for a game that posts one
 	// per table. Empty where the bond is the identity's.
-	SeatBond      Funded            `json:"seatBond,omitempty"`
-	Funded        map[uint32]Funded `json:"funded,omitempty"`
-	TableBonds    map[uint32]Funded `json:"tableBonds,omitempty"`
-	ForfeitBonds  map[uint32]Funded `json:"forfeitBonds,omitempty"`
-	Payouts       map[uint32]string `json:"payouts,omitempty"`
-	PunishmentKey map[uint32]string `json:"punishmentKeys,omitempty"`
+	SeatBond Funded            `json:"seatBond,omitempty"`
+	Funded   map[uint32]Funded `json:"funded,omitempty"`
+	Payouts  map[uint32]string `json:"payouts,omitempty"`
 
 	// Game is whatever the game keeps alongside this table, untouched. Only
 	// a game that implements Persisting has one.
@@ -114,46 +119,39 @@ func (r *Runtime) snapshot(t *table) TableRecord {
 
 // snapshotLocked renders a table as it stands. Caller holds r.mu.
 func (r *Runtime) snapshotLocked(t *table) TableRecord {
-	rec := TableRecord{Match: t.match, GCID: t.gcID, Terms: t.terms}
-	if t.form == nil {
+	rec := TableRecord{Version: 2, BridgePayout: t.bridgePayout, PayoutID: t.payoutID, BridgeKey: t.bridgeKey, Match: t.match, GCID: t.gcID, Terms: t.terms, RecoveryOnly: t.recoveryOnly, RecoveryReason: t.recoveryReason}
+	if t.formation() == nil {
 		// Accepted but not yet joined: the terms and whatever its seat
 		// bond has cost so far, which is the whole of what it knows.
 		rec.SeatBond = Funded{Outpoint: t.seatBond.outpoint, Atoms: t.seatBond.atoms}
 		return rec
 	}
-	rec.Terms = t.form.Terms()
-	for _, j := range t.form.Joins() {
+	rec.Terms = t.formation().Terms()
+	for _, j := range t.formation().Joins() {
 		rec.Joins = append(rec.Joins, schema.JoinFrom(j))
 	}
-	for _, c := range t.form.Commits() {
+	for _, c := range t.formation().Commits() {
 		rec.Commits = append(rec.Commits, schema.CommitFrom(c))
 	}
-	if b := t.form.Beacon(); len(b) > 0 {
+	if b := t.formation().Beacon(); len(b) > 0 {
 		rec.Beacon = hex.EncodeToString(b)
 	}
-	if h, ok := t.form.RosterHash(); ok && bound(t.form.State()) {
+	if h, ok := t.formation().RosterHash(); ok && bound(t.formation().State()) {
 		rec.Bound, rec.Roster = true, hex.EncodeToString(h[:])
 	}
-	if t.form.State() == membership.Aborted {
-		rec.Aborted, rec.Reason = true, t.form.Reason()
+	if t.formation().State() == membership.Aborted {
+		rec.Aborted, rec.Reason = true, t.formation().Reason()
 	}
 
 	rec.SeatBond = Funded{Outpoint: t.seatBond.outpoint, Atoms: t.seatBond.atoms}
 	rec.Funded = fundedOf(t.funded)
-	rec.TableBonds = fundedOf(t.tableBondFunded)
-	rec.ForfeitBonds = fundedOf(t.forfeitFunded)
 	for seat, pay := range t.payouts {
 		if rec.Payouts == nil {
 			rec.Payouts = map[uint32]string{}
 		}
 		rec.Payouts[seat] = hex.EncodeToString(pay)
 	}
-	for seat, pub := range t.punishPubs {
-		if rec.PunishmentKey == nil {
-			rec.PunishmentKey = map[uint32]string{}
-		}
-		rec.PunishmentKey[seat] = hex.EncodeToString(pub)
-	}
+
 	return rec
 }
 
@@ -185,32 +183,34 @@ func stakedOf(in map[uint32]Funded) map[uint32]staked {
 
 // keep writes a table down, including whatever the game keeps with it.
 //
-// Called after anything that changes a table durably. Failing to write is
-// logged rather than returned: the change has already happened in memory and
-// often on the chain, and unwinding it because a disk was full would be worse
-// than coming back up a record short.
-func (r *Runtime) keep(t *table) {
-	if r.store == nil {
-		return
+// A failed write latches a storage fault. Subsequent signing, funding and
+// broadcast are blocked until the runtime is reopened from durable state.
+func (r *Runtime) keep(t *table) error {
+	r.persistMu.Lock()
+	defer r.persistMu.Unlock()
+	if err := r.healthy(); err != nil {
+		return err
 	}
-	r.write(t, r.snapshot(t))
+	if r.store == nil {
+		return nil
+	}
+	return r.write(t, r.snapshot(t))
 }
-
-// write persists one rendered record. Never called under r.mu: it calls into
-// the game, and a game that called back would find the runtime holding its own
-// lock.
-func (r *Runtime) write(t *table, rec TableRecord) {
+func (r *Runtime) write(t *table, rec TableRecord) error {
+	if err := r.healthy(); err != nil {
+		return err
+	}
 	if p, ok := r.rules.(Persisting); ok {
 		blob, err := p.SaveTable(t.match)
 		if err != nil {
-			r.log.Errorf("table %s: the game could not save its own state: %v", t.match, err)
-		} else {
-			rec.Game = blob
+			return r.storageFault(err)
 		}
+		rec.Game = blob
 	}
 	if err := r.store.SaveTable(rec); err != nil {
-		r.log.Errorf("table %s: could not write it down: %v", t.match, err)
+		return r.storageFault(err)
 	}
+	return nil
 }
 
 // forget drops a table from the store, for one that is over.
@@ -229,12 +229,13 @@ func (r *Runtime) forget(match string) {
 // rather than taken down with the rest: one unreadable record must not cost
 // every other table its settlement.
 func (r *Runtime) Resume() error {
+	r.resumeReport = ResumeReport{Failed: map[string]string{}}
 	if r.store == nil {
 		return nil
 	}
-	recs, err := r.store.LoadTables()
-	if err != nil {
-		return fmt.Errorf("read the tables back: %w", err)
+	recs, loadErr := r.store.LoadTables()
+	if loadErr != nil {
+		r.resumeReport.Failed["storage"] = loadErr.Error()
 	}
 	// In a fixed order, so a run that resumes ten tables logs the same way
 	// twice and a failure can be found again.
@@ -244,21 +245,41 @@ func (r *Runtime) Resume() error {
 	for _, rec := range recs {
 		if err := r.resume(rec); err != nil {
 			failed++
+			r.resumeReport.Failed[rec.Match] = err.Error()
 			r.log.Errorf("table %s did not come back: %v", rec.Match, err)
+		} else if rec.RecoveryOnly || rec.Aborted {
+			r.resumeReport.RecoveryOnly = append(r.resumeReport.RecoveryOnly, rec.Match)
+		} else {
+			r.resumeReport.Restored = append(r.resumeReport.Restored, rec.Match)
 		}
 	}
 	if failed > 0 {
 		r.log.Warnf("%d of %d tables did not come back", failed, len(recs))
 	}
-	return nil
+	return loadErr
 }
 
 // resume rebuilds one table from its record.
 func (r *Runtime) resume(rec TableRecord) error {
+	if rec.Version != 2 {
+		return fmt.Errorf("unsupported table record version %d", rec.Version)
+	}
+	if err := rec.Terms.Validate(); err != nil {
+		return fmt.Errorf("invalid stored terms: %w", err)
+	}
+	if rec.Terms.SID != rec.Match || !gcID.MatchString(rec.GCID) {
+		return fmt.Errorf("invalid stored table identity")
+	}
 	if rec.Match == "" {
 		return fmt.Errorf("a record with no table")
 	}
-	if rec.Aborted {
+	heldPayment := false
+	for _, payment := range r.book.All() {
+		if payment.Match == rec.Match && payment.State != spend.Denied && payment.State != spend.Expired {
+			heldPayment = true
+		}
+	}
+	if rec.Aborted && !heldPayment && rec.SeatBond.Outpoint == "" && len(rec.Funded) == 0 {
 		// Terminal, and it stays terminal. Rebuilt as a tombstone
 		// rather than a table so a commit that arrives after everyone
 		// else gave up cannot put this process back into a membership
@@ -271,13 +292,21 @@ func (r *Runtime) resume(rec TableRecord) error {
 	// The table first, because a per-table seat bond is the table's and the
 	// credentials cannot be built without knowing where it is.
 	t := &table{
-		match: rec.Match, gcID: rec.GCID, terms: rec.Terms,
-		seatBond:        staked{outpoint: rec.SeatBond.Outpoint, atoms: rec.SeatBond.Atoms},
-		funded:          stakedOf(rec.Funded),
-		tableBondFunded: stakedOf(rec.TableBonds),
-		forfeitFunded:   stakedOf(rec.ForfeitBonds),
-		payouts:         map[uint32][]byte{},
-		punishPubs:      map[uint32][]byte{},
+		match: rec.Match, gcID: rec.GCID, terms: rec.Terms, bridgeKey: rec.BridgeKey, payoutID: rec.PayoutID, bridgePayout: rec.BridgePayout, recoveryOnly: rec.RecoveryOnly || rec.Aborted, recoveryReason: rec.RecoveryReason,
+		seatBond: staked{outpoint: rec.SeatBond.Outpoint, atoms: rec.SeatBond.Atoms},
+		funded:   stakedOf(rec.Funded),
+		payouts:  map[uint32][]byte{},
+	}
+	if len(rec.Joins) == 0 && !rec.Bound && rec.Beacon == "" {
+		if p, ok := r.rules.(Persisting); ok && len(rec.Game) > 0 {
+			if err := p.LoadTable(rec.Match, rec.Game); err != nil {
+				return err
+			}
+		}
+		r.mu.Lock()
+		r.tables[rec.Match] = t
+		r.mu.Unlock()
+		return nil
 	}
 	creds, err := r.seatCredentials(t, rec.Terms)
 	if err != nil {
@@ -334,7 +363,7 @@ func (r *Runtime) resume(rec TableRecord) error {
 		}
 	}
 
-	t.form = form
+	t.setFormation(form)
 	for seat, hexed := range rec.Payouts {
 		pay, err := hex.DecodeString(hexed)
 		if err != nil {
@@ -342,13 +371,7 @@ func (r *Runtime) resume(rec TableRecord) error {
 		}
 		t.payouts[seat] = pay
 	}
-	for seat, hexed := range rec.PunishmentKey {
-		pub, err := hex.DecodeString(hexed)
-		if err != nil {
-			return fmt.Errorf("recorded punishment key for seat %d: %w", seat, err)
-		}
-		t.punishPubs[seat] = pub
-	}
+
 	if seats, ok := form.Seats(); ok {
 		t.seats = seats
 	}
@@ -369,22 +392,7 @@ func (r *Runtime) resume(rec TableRecord) error {
 	// the seed and the roster, so it is never written down. Rebuilding the
 	// bonds needs every seat's announcement, which is why it is tried and
 	// not required.
-	if len(t.punishPubs) > 0 {
-		if seats, ok := form.Seats(); ok {
-			if mine, ours := form.OurSeat(); ours {
-				if key, err := r.punishKeyFor(t, seats, mine); err == nil {
-					r.mu.Lock()
-					t.punish = key
-					r.mu.Unlock()
-				}
-			}
-			if len(t.punishPubs) == len(seats) {
-				if err := r.buildForfeitableBonds(t); err != nil {
-					r.log.Warnf("table %s: forfeitable bonds did not come back: %v", rec.Match, err)
-				}
-			}
-		}
-	}
+
 	return nil
 }
 
@@ -393,6 +401,7 @@ func (r *Runtime) resume(rec TableRecord) error {
 type MemTableStore struct {
 	mu   sync.Mutex
 	recs map[string]TableRecord
+	ops  map[string]string
 }
 
 func NewMemTableStore() *MemTableStore {
@@ -404,7 +413,7 @@ func (m *MemTableStore) LoadTables() ([]TableRecord, error) {
 	defer m.mu.Unlock()
 	out := make([]TableRecord, 0, len(m.recs))
 	for _, r := range m.recs {
-		out = append(out, r)
+		out = append(out, cloneRecord(r))
 	}
 	return out, nil
 }
@@ -412,7 +421,7 @@ func (m *MemTableStore) LoadTables() ([]TableRecord, error) {
 func (m *MemTableStore) SaveTable(rec TableRecord) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.recs[rec.Match] = rec
+	m.recs[rec.Match] = cloneRecord(rec)
 	return nil
 }
 
@@ -463,21 +472,28 @@ func (f *FileTableStore) LoadTables() ([]TableRecord, error) {
 		return nil, fmt.Errorf("read the table directory: %w", err)
 	}
 	var out []TableRecord
+	var failures []error
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
 		blob, err := os.ReadFile(filepath.Join(f.dir, e.Name()))
 		if err != nil {
-			return nil, fmt.Errorf("read %s: %w", e.Name(), err)
+			failures = append(failures, fmt.Errorf("read %s: %w", e.Name(), err))
+			continue
 		}
 		var rec TableRecord
 		if err := json.Unmarshal(blob, &rec); err != nil {
-			return nil, fmt.Errorf("read %s: %w", e.Name(), err)
+			failures = append(failures, fmt.Errorf("read %s: %w", e.Name(), err))
+			continue
+		}
+		if rec.Match+".json" != e.Name() {
+			failures = append(failures, fmt.Errorf("record filename mismatch: %s", e.Name()))
+			continue
 		}
 		out = append(out, rec)
 	}
-	return out, nil
+	return out, errors.Join(failures...)
 }
 
 func (f *FileTableStore) SaveTable(rec TableRecord) error {
@@ -508,13 +524,17 @@ func (f *FileTableStore) SaveTable(rec TableRecord) error {
 		tmp.Close()
 		return fmt.Errorf("write the table: %w", err)
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
 	if err := os.Rename(tmp.Name(), path); err != nil {
 		return fmt.Errorf("write the table: %w", err)
 	}
-	return nil
+	return syncDirectory(f.dir)
 }
 
 func (f *FileTableStore) DropTable(match string) error {
@@ -527,7 +547,7 @@ func (f *FileTableStore) DropTable(match string) error {
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("forget the table: %w", err)
 	}
-	return nil
+	return syncDirectory(f.dir)
 }
 
 // Getting up from a table is the game's message, not this one's.
@@ -547,13 +567,28 @@ func (f *FileTableStore) DropTable(match string) error {
 // outliving every record of where it is. The lock is measured in days and this
 // process is not.
 func (r *Runtime) HoldsOurs(match string) bool {
+	for _, rec := range r.book.All() {
+		if rec.Match == match && rec.State != spend.Denied && rec.State != spend.Expired && rec.State != spend.Located {
+			return true
+		}
+	}
+	r.mu.Lock()
+	pending := r.tables[match]
+	held := pending != nil && pending.seatBond.outpoint != ""
+	r.mu.Unlock()
+	if held {
+		return true
+	}
+	if pending != nil && pending.formation() == nil && !pending.recoveryOnly {
+		return true
+	}
 	t, seat, err := r.ourSeatAt(match)
 	if err != nil {
 		return false
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, held := range []map[uint32]staked{t.funded, t.tableBondFunded, t.forfeitFunded} {
+	for _, held := range []map[uint32]staked{t.funded} {
 		if held[seat].outpoint != "" {
 			return true
 		}
@@ -574,11 +609,17 @@ func (r *Runtime) Drop(match string) error {
 	}
 	r.mu.Lock()
 	_, ok := r.tables[match]
-	delete(r.tables, match)
 	r.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("no table %q", match)
 	}
-	r.forget(match)
+	if r.store != nil {
+		if err := r.store.DropTable(match); err != nil {
+			return r.storageFault(err)
+		}
+	}
+	r.mu.Lock()
+	delete(r.tables, match)
+	r.mu.Unlock()
 	return nil
 }

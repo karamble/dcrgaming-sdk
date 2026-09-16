@@ -224,11 +224,11 @@ func (r *Runtime) LogKey(match string) (*forfeit.LogKey, error) {
 	if err != nil {
 		return nil, err
 	}
-	matchID, ok := t.form.RosterHash()
+	matchID, ok := t.formation().RosterHash()
 	if !ok {
 		return nil, fmt.Errorf("table %q has no settled roster, so nothing can be signed for it yet", match)
 	}
-	_, logKey, err := r.seatKeys(t.form.Terms().SID)
+	_, logKey, err := r.seatKeys(t.formation().Terms().SID)
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +246,7 @@ func (r *Runtime) MatchID(match string) (string, bool) {
 	if err != nil {
 		return "", false
 	}
-	matchID, ok := t.form.RosterHash()
+	matchID, ok := t.formation().RosterHash()
 	if !ok {
 		return "", false
 	}
@@ -260,5 +260,5 @@ func (r *Runtime) LogSeats(match string) (map[uint32][]byte, bool) {
 	if err != nil {
 		return nil, false
 	}
-	return t.form.LogSeats()
+	return t.formation().LogSeats()
 }

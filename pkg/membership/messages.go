@@ -132,21 +132,10 @@ func (t Terms) Validate() error {
 		// formed by guessing.
 		return fmt.Errorf("terms state no admission deadline")
 	}
-	if t.bonded() {
-		// Stating one term and not the other is caught by the floors
-		// below: the missing half is zero, and zero is under both.
-		if t.BondAtoms < escrow.MinBondAtoms {
-			return fmt.Errorf("a bond of %d atoms is under the escrow floor of %d",
-				t.BondAtoms, escrow.MinBondAtoms)
-		}
-		if t.BondLockBlocks < escrow.MinBondBlocks {
-			return fmt.Errorf("a bond lock of %d blocks is under the escrow floor of %d",
-				t.BondLockBlocks, escrow.MinBondBlocks)
-		}
-		if t.AccuseFeeAtoms == 0 {
-			return fmt.Errorf("a table with bonds must state what one rung of an accusation costs")
-		}
+	if t.BondAtoms == 0 || t.BondAtoms > 21000000*100000000 || t.BondLockBlocks == 0 || t.BondLockBlocks > escrow.MaxCSVBlocks {
+		return fmt.Errorf("invalid admission bond terms")
 	}
+
 	return nil
 }
 
@@ -369,9 +358,8 @@ func (j *Join) Verify(t Terms) error {
 	if err != nil {
 		return fmt.Errorf("bond script: %w", err)
 	}
-	if terms.LockBlocks < escrow.MinBondBlocks {
-		return fmt.Errorf("bond is locked for %d blocks, under the %d minimum",
-			terms.LockBlocks, escrow.MinBondBlocks)
+	if terms.LockBlocks != t.BondLockBlocks {
+		return fmt.Errorf("admission bond delay differs from agreed terms")
 	}
 	if err := escrow.VerifyBondPoP(j.Bond.Script, j.Bond.Outpoint, j.Key, j.Bond.PoP); err != nil {
 		return fmt.Errorf("bond: %w", err)

@@ -7,12 +7,9 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/txscript/v4/stdaddr"
-	"github.com/decred/dcrd/wire"
 	"github.com/decred/slog"
 
-	"github.com/karamble/dcrgaming-sdk/pkg/escrow"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/transport"
 	"github.com/karamble/dcrgaming-sdk/pkg/identity"
@@ -47,31 +44,6 @@ type Config struct {
 	// Params is the chain the game is playing on. Required: every script
 	// and address is built against it.
 	Params stdaddr.AddressParams
-	// PunishTag is the game's own domain tag for punishment-key
-	// announcements. Frozen like SeatTags, and the game's to state.
-	// Optional: a game with no forfeitable bonds needs none.
-	PunishTag []byte
-	// AccuseFeeAtoms is what one rung of an accusation chain pays, for a
-	// table whose Terms do not state it.
-	//
-	// Terms win where they say anything, because a fee both seats agreed is
-	// stronger than one they each read from their own build. This exists for
-	// dcrpoker, whose live tables predate the term and whose digest cannot
-	// move to add it. Zero on both is refused rather than defaulted: a chain
-	// built at a fee nobody chose has an attrition bound that is a guess.
-	AccuseFeeAtoms uint64
-	// ReclaimFeeAtoms is what a reclaim, a sweep and a release pay. Zero
-	// means DefaultReclaimFee.
-	//
-	// A fee is an economic choice, the same reason the ladder's is a
-	// parameter: dcrpoker has always paid 20,000 and adopting somebody
-	// else's number would silently change bytes that move its money.
-	ReclaimFeeAtoms int64
-	// BondScope says how many seat bonds a player posts: one backing every
-	// table, or a fresh one for each. An economic choice, and the two
-	// existing games made different ones - see [BondScope]. Zero value is
-	// one per identity.
-	BondScope BondScope
 	// SeatTags are the game's own domain-separation tags for those keys.
 	// Required, and the game's to state: they are frozen hash inputs that
 	// decide which keys a seat has, so the SDK must not invent them.
@@ -90,24 +62,33 @@ type Config struct {
 //
 // A game hands it [Rules] and calls [Game] methods; it never drives.
 type Runtime struct {
-	rules      Rules
-	bridge     *transport.Bridge
-	book       *spend.Book
-	identity   *identity.Identity
-	seatTags   identity.SeatTags
-	params     stdaddr.AddressParams
-	punishTag  []byte
-	accuseFee  uint64
-	bondScope  BondScope
-	reclaimFee int64
-	router     *transport.Router
-	log        slog.Logger
+	persistMu         sync.Mutex
+	admissionMu       sync.Mutex
+	fundingMu         sync.Mutex
+	obligationLocks   map[string]*sync.Mutex
+	faultMu           sync.Mutex
+	storageErr        error
+	lifeMu            sync.Mutex
+	workers           sync.WaitGroup
+	running, stopping bool
+	admissionWorkers  map[string]bool
+	faultCh           chan struct{}
+	resumeReport      ResumeReport
+	releases          []func() error
+
+	rules    Rules
+	bridge   *transport.Bridge
+	book     *spend.Book
+	identity *identity.Identity
+	seatTags identity.SeatTags
+	params   stdaddr.AddressParams
+	router   *transport.Router
+	log      slog.Logger
 
 	// sweepMu guards what this process has broadcast a spend of. Its own
 	// lock because it is consulted from the reclaim path while the table
 	// lock is not held.
-	sweepMu  sync.Mutex
-	sweeping map[string]bool
+	sweepMu sync.Mutex
 
 	// runCtx is the context Run was given, so a message the router delivers
 	// carries the same lifetime as the loop that fetched it.
@@ -123,17 +104,18 @@ type Runtime struct {
 	// across a restart, because a commit arriving after everyone else gave
 	// up would otherwise put this process back into a membership nobody is
 	// bound to.
-	ended  map[string]string
-	payout string
-	names  map[string]string
+	ended map[string]string
+	names map[string]string
 }
 
 // table is one table's runtime state. Seating fills it in; the stages read it.
 type table struct {
-	match string
-	gcID  string
-	form  *membership.Formation
-	seats map[uint32][]byte
+	formMu    sync.Mutex
+	formPtrMu sync.RWMutex
+	match     string
+	gcID      string
+	form      *membership.Formation
+	seats     map[uint32][]byte
 
 	// funded is where each seat's stake landed, filled in by the funding
 	// stage. payouts is where each seat asked to be paid, which every seat
@@ -142,30 +124,12 @@ type table struct {
 	payouts map[uint32][]byte
 
 	// settle gathers signatures on this table's payout.
-	settle *settlement
+	payoutID     string
+	bridgePayout string
 
-	// punishPubs is every seat's announced punishment key, and punish is
-	// ours. forfeitBonds are derived once every seat has announced.
-	punishPubs      map[uint32][]byte
-	punish          *secp256k1.PrivateKey
-	forfeitBonds    map[uint32]membership.ForfeitableBond
-	forfeitFunded   map[uint32]staked
-	tableBondFunded map[uint32]staked
-	// releases are the table bonds going home cooperatively, by the seat
-	// each one pays. Both of them: a release pays its owner and nobody
-	// else, so the two seats' releases are different transactions and each
-	// needs the other's signature.
-	releases map[uint32]*release
-	// ladders are the accusation chains this table has built, by the seat
-	// each one accuses. Both of them: the one against the opponent is the
-	// one this peer may run, and the one against itself is the one it must
-	// co-sign so the opponent can run that.
-	ladders map[uint32]*ladder
-
-	// seatBond is the bond this seat's join binds to, for a game that posts
-	// one per table. Empty for a game that posts one per identity, where
-	// the deposit is the identity's and not the table's.
-	seatBond staked
+	// seatBond is this table's bridge-controlled admission deposit.
+	seatBond  staked
+	bridgeKey string
 
 	// terms are this table's, kept because a per-table seat bond has to be
 	// funded before there is a formation to ask.
@@ -173,15 +137,9 @@ type table struct {
 
 	// saidAt is the height this table last repeated its announcements at,
 	// so they go out once a block rather than once a poll.
-	saidAt int64
-}
-
-// settlement is one table's payout, part-signed.
-type settlement struct {
-	tx    *wire.MsgTx
-	draft escrow.SettleDraft
-	sigs  map[string][][]byte // by signer's compressed session pubkey, hex
-	done  bool
+	saidAt         int64
+	recoveryOnly   bool
+	recoveryReason string
 }
 
 // staked is one seat's stake on the chain.
@@ -217,21 +175,14 @@ func New(cfg Config) (*Runtime, error) {
 	if log == nil {
 		log = slog.Disabled
 	}
-	reclaimFee := cfg.ReclaimFeeAtoms
-	if reclaimFee <= 0 {
-		reclaimFee = DefaultReclaimFee
-	}
-	r := &Runtime{
+	r := &Runtime{admissionWorkers: map[string]bool{}, faultCh: make(chan struct{}),
 		rules: cfg.Rules, bridge: cfg.Bridge, book: cfg.Book, log: log,
 		identity: cfg.Identity, seatTags: cfg.SeatTags, params: cfg.Params,
-		punishTag: cfg.PunishTag, accuseFee: cfg.AccuseFeeAtoms,
-		bondScope:  cfg.BondScope,
-		reclaimFee: reclaimFee,
-		store:      cfg.Tables,
-		tables:     map[string]*table{},
-		ended:      map[string]string{},
-		names:      map[string]string{},
-		runCtx:     context.Background(),
+		store:  cfg.Tables,
+		tables: map[string]*table{},
+		ended:  map[string]string{},
+		names:  map[string]string{},
+		runCtx: context.Background(),
 	}
 	// Built here rather than when Run starts, so a game that acts before the
 	// loop is up finds a router instead of a race.
@@ -251,6 +202,9 @@ func New(cfg Config) (*Runtime, error) {
 		return nil, fmt.Errorf("build the router: %w", err)
 	}
 	r.router = router
+	if err := r.acquireOwnership(); err != nil {
+		return nil, err
+	}
 	return r, nil
 }
 
@@ -260,17 +214,20 @@ func New(cfg Config) (*Runtime, error) {
 // The runtime does not look inside a game's body and does not retry: a
 // redelivered move is a replayed move, so a game that wants one has to ask.
 func (r *Runtime) deliver(d transport.Delivery) {
+	r.lifeMu.Lock()
+	ctx := r.runCtx
+	r.lifeMu.Unlock()
 	msg := Message{Match: d.SID, GCID: d.GCID, From: d.Sender}
 	if d.Msg != nil {
 		msg.Kind, msg.Body = d.Msg.Kind, d.Msg.Body
 	}
 	if r.ours(msg.Kind) {
-		if err := r.handleOurs(r.runCtx, msg); err != nil {
+		if err := r.handleOurs(ctx, msg); err != nil {
 			r.log.Warnf("a %s message was not taken: %v", msg.Kind, err)
 		}
 		return
 	}
-	if err := r.rules.Handle(r.runCtx, msg); err != nil {
+	if err := r.rules.Handle(ctx, msg); err != nil {
 		r.log.Warnf("the game refused a %s message: %v", msg.Kind, err)
 	}
 }
@@ -283,7 +240,7 @@ func (r *Runtime) deliver(d transport.Delivery) {
 // which is why the set is small, fixed, and documented.
 func (r *Runtime) ours(k schema.Kind) bool {
 	switch k {
-	case schema.KindJoin, schema.KindCommit, schema.KindSettle, KindPunishKey, KindRelease, KindAccusation,
+	case schema.KindJoin, schema.KindCommit,
 		KindFunded, KindBonded, KindPayout, KindRoster, KindResync, KindResyncReply:
 		return true
 	}
@@ -315,13 +272,6 @@ func (r *Runtime) handleOurs(ctx context.Context, msg Message) error {
 		}
 		return r.addCommit(ctx, msg.Match, c)
 
-	case schema.KindSettle:
-		var st schema.Settle
-		if err := json.Unmarshal(msg.Body, &st); err != nil {
-			return fmt.Errorf("read a payout: %w", err)
-		}
-		return r.adoptSettlement(ctx, msg.Match, st)
-
 	case KindResync:
 		var ask schema.Resync
 		if err := json.Unmarshal(msg.Body, &ask); err != nil {
@@ -350,13 +300,6 @@ func (r *Runtime) handleOurs(ctx context.Context, msg Message) error {
 		}
 		return r.adoptFunded(ctx, msg.Match, f)
 
-	case KindBonded:
-		var b schema.Bonded
-		if err := json.Unmarshal(msg.Body, &b); err != nil {
-			return fmt.Errorf("read where a bond is: %w", err)
-		}
-		return r.adoptBonded(ctx, msg.Match, b)
-
 	case KindPayout:
 		var pay schema.Payout
 		if err := json.Unmarshal(msg.Body, &pay); err != nil {
@@ -364,26 +307,6 @@ func (r *Runtime) handleOurs(ctx context.Context, msg Message) error {
 		}
 		return r.adoptPayout(ctx, msg.Match, pay)
 
-	case KindPunishKey:
-		var n membership.PunishNote
-		if err := json.Unmarshal(msg.Body, &n); err != nil {
-			return fmt.Errorf("read a punishment-key announcement: %w", err)
-		}
-		return r.adoptPunishKey(ctx, msg.Match, n)
-
-	case KindRelease:
-		var rel schema.Release
-		if err := json.Unmarshal(msg.Body, &rel); err != nil {
-			return fmt.Errorf("read a release: %w", err)
-		}
-		return r.adoptRelease(ctx, msg.Match, rel)
-
-	case KindAccusation:
-		var a schema.Accusation
-		if err := json.Unmarshal(msg.Body, &a); err != nil {
-			return fmt.Errorf("read an accusation: %w", err)
-		}
-		return r.adoptAccusation(ctx, msg.Match, a)
 	}
 	return nil
 }
@@ -394,7 +317,35 @@ func (r *Runtime) handleOurs(ctx context.Context, msg Message) error {
 // this game. Both stop when the context does, and Run returns the first error
 // that is not simply the context ending.
 func (r *Runtime) Run(ctx context.Context) error {
+	r.lifeMu.Lock()
+	if r.running || r.stopping {
+		r.lifeMu.Unlock()
+		return fmt.Errorf("runtime already started")
+	}
+	ctx, cancel := context.WithCancel(ctx)
 	r.runCtx = ctx
+	r.running = true
+	r.lifeMu.Unlock()
+	defer func() {
+		r.lifeMu.Lock()
+		r.stopping = true
+		r.lifeMu.Unlock()
+		cancel()
+		r.workers.Wait()
+		r.lifeMu.Lock()
+		r.running = false
+		r.releaseOwnership()
+		r.lifeMu.Unlock()
+	}()
+	r.mu.Lock()
+	pending := make([]*table, 0, len(r.tables))
+	for _, t := range r.tables {
+		pending = append(pending, t)
+	}
+	r.mu.Unlock()
+	for _, t := range pending {
+		r.startAdmission(t)
+	}
 
 	// The bridge says when it dropped frames, and a dropped formation
 	// message is one nobody will send again. Registered before the stream
@@ -415,10 +366,25 @@ func (r *Runtime) Run(ctx context.Context) error {
 	}
 
 	errs := make(chan error, 2)
-	go func() { errs <- r.serveRequests(ctx) }()
-	go func() { errs <- r.route(ctx, frames) }()
+	var consumers sync.WaitGroup
+	consumers.Add(2)
+	go func() { defer consumers.Done(); errs <- r.serveRequests(ctx) }()
+	go func() { defer consumers.Done(); errs <- r.route(ctx, frames) }()
 
-	first := <-errs
+	var first error
+	select {
+	case first = <-errs:
+	case <-r.faultCh:
+		first = r.healthy()
+	case <-ctx.Done():
+		first = ctx.Err()
+	}
+	cancel()
+	// Both request and frame consumers finish before the caller closes stores.
+	consumers.Wait()
+	if first == nil {
+		first = ctx.Err()
+	}
 	if first != nil && !errors.Is(first, context.Canceled) {
 		return first
 	}
@@ -466,7 +432,7 @@ func (r *Runtime) Seat(match string) (uint32, bool) {
 	if err != nil {
 		return 0, false
 	}
-	return t.form.OurSeat()
+	return t.formation().OurSeat()
 }
 
 // Seats is a table's roster once it has formed.
@@ -484,7 +450,6 @@ func (r *Runtime) Seats(match string) (map[uint32][]byte, bool) {
 	return out, true
 }
 
-// Payout is the address the operator set for winnings, if they have set one.
 // Terms are one table's money terms, as agreed. Empty for a table this game is
 // not at.
 //
@@ -497,16 +462,7 @@ func (r *Runtime) Terms(match string) membership.Terms {
 	if err != nil {
 		return membership.Terms{}
 	}
-	if t.form != nil {
-		return t.form.Terms()
-	}
 	return t.terms
-}
-
-func (r *Runtime) Payout() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.payout
 }
 
 // Names is the operator's names for the identities at the table.
@@ -523,3 +479,24 @@ func (r *Runtime) Names() map[string]string {
 // Book is the record of money in flight, for a game that wants to read it.
 // Reading is supported; writing to it behind the runtime's back is not.
 func (r *Runtime) Book() *spend.Book { return r.book }
+
+func (t *table) formation() *membership.Formation {
+	t.formPtrMu.RLock()
+	defer t.formPtrMu.RUnlock()
+	return t.form
+}
+func (t *table) setFormation(f *membership.Formation) {
+	t.formPtrMu.Lock()
+	defer t.formPtrMu.Unlock()
+	t.form = f
+}
+
+// PayoutFor is the wallet destination independently established by the bridge.
+func (r *Runtime) PayoutFor(match string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if t := r.tables[match]; t != nil {
+		return t.bridgePayout
+	}
+	return ""
+}

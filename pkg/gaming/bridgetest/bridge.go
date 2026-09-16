@@ -24,14 +24,11 @@
 //
 // # What it does not do
 //
-// It does not validate scripts, check signatures, enforce spend caps or ask
-// anyone for a passphrase. A real bridge is the policy boundary; this is a
-// stand-in for its shape, not for its judgement. A transaction handed to
-// Broadcast is taken at its word and its outputs appear on the fake chain.
+// It does not model wallet ownership or approval UI. It does validate the
+// public financial descriptors and signatures used by its simulated authority.
 package bridgetest
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
@@ -41,8 +38,8 @@ import (
 	"sync/atomic"
 
 	"github.com/decred/dcrd/crypto/blake256"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/txscript/v4/stdaddr"
-	"github.com/decred/dcrd/wire"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
@@ -91,6 +88,10 @@ type Options struct {
 // Safe for concurrent use: a game under test is talking to it from several
 // goroutines, which is the situation the real thing is in too.
 type Bridge struct {
+	financialKeys map[string]*secp256k1.PrivateKey
+	deposits      map[string]fakeDeposit
+	payouts       map[string]*fakePayout
+	payoutVerdict Verdict
 	gamingpb.UnimplementedBridgeServiceServer
 
 	opts Options
@@ -112,8 +113,9 @@ type Bridge struct {
 	// asks is where each subscriber's operator requests go.
 	asks map[string]chan *gamingpb.BridgeRequest
 
-	unreachable atomic.Bool
-	pushed      atomic.Int64
+	unreachable       atomic.Bool
+	framesUnavailable atomic.Bool
+	pushed            atomic.Int64
 }
 
 // New returns a fake bridge that is not yet serving. Call Serve.
@@ -125,7 +127,7 @@ func New(opts Options) *Bridge {
 		opts.Network = "mainnet"
 	}
 	return &Bridge{
-		opts: opts, height: opts.Height,
+		opts: opts, height: opts.Height, payoutVerdict: Hold,
 		spends: map[string]*gamingpb.Spend{},
 		utxos:  map[string]Utxo{},
 		sent:   map[string]int{},
@@ -140,6 +142,9 @@ func New(opts Options) *Bridge {
 // that this process could not ask, never that the answer was no. A spend held
 // across an unreachable window is still a spend that may have been paid.
 func (b *Bridge) SetUnreachable(on bool) { b.unreachable.Store(on) }
+
+// SetFramesUnavailable fails frame sends while chain and payment queries work.
+func (b *Bridge) SetFramesUnavailable(on bool) { b.framesUnavailable.Store(on) }
 
 // SetVerdict decides what happens to spend requests from now on. The reason is
 // used only by Refuse.
@@ -337,7 +342,7 @@ func (b *Bridge) decide(sp *gamingpb.Spend, v Verdict, reason string) {
 }
 
 func (b *Bridge) Hello(_ context.Context, _ *gamingpb.HelloRequest) (*gamingpb.HelloReply, error) {
-	return &gamingpb.HelloReply{Game: b.opts.Game, Network: b.opts.Network}, nil
+	return &gamingpb.HelloReply{Game: b.opts.Game, Network: b.opts.Network, BridgeContractVersion: 3}, nil
 }
 
 // Subscribe registers the caller by its certificate name and delivers every
@@ -355,7 +360,10 @@ func (b *Bridge) Subscribe(_ *gamingpb.SubscribeRequest, stream grpc.ServerStrea
 	b.mu.Unlock()
 	defer func() {
 		b.mu.Lock()
-		delete(b.asks, cn)
+		if b.subs[cn] == ch {
+			delete(b.subs, cn)
+			delete(b.asks, cn)
+		}
 		b.mu.Unlock()
 	}()
 
@@ -387,6 +395,9 @@ func (b *Bridge) Subscribe(_ *gamingpb.SubscribeRequest, stream grpc.ServerStrea
 // SendFrame fans one seat's frame out to every other subscriber, never back to
 // the sender.
 func (b *Bridge) SendFrame(ctx context.Context, req *gamingpb.SendFrameRequest) (*gamingpb.SendFrameReply, error) {
+	if b.framesUnavailable.Load() {
+		return nil, status.Error(codes.Unavailable, "frame delivery unavailable")
+	}
 	from := callerCN(ctx)
 	frame := &gamingpb.Frame{Gcid: req.GetGcid(), From: from, Frame: req.GetFrame()}
 	b.mu.Lock()
@@ -433,18 +444,28 @@ func (b *Bridge) Outpoint(_ context.Context, req *gamingpb.OutpointRequest) (*ga
 	}, nil
 }
 
-func (b *Bridge) RequestSpend(_ context.Context, req *gamingpb.RequestSpendRequest) (*gamingpb.Spend, error) {
+func (b *Bridge) RequestSpend(ctx context.Context, req *gamingpb.RequestSpendRequest) (*gamingpb.Spend, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	dep, ok := b.deposits[req.DepositId]
+	if !ok || dep.Owner != callerCN(ctx) || dep.Reply.Address != req.Address || dep.Terms.Atoms != req.AmountAtoms {
+		return nil, fmt.Errorf("verified deposit required")
+	}
+	if dep.Spend != "" {
+		return b.spends[dep.Spend], nil
+	}
 	b.nextID++
 	sp := &gamingpb.Spend{
 		Id:          fmt.Sprintf("spend-%d", b.nextID),
+		Game:        b.opts.Game,
 		Address:     req.GetAddress(),
 		AmountAtoms: req.GetAmountAtoms(),
 		Reason:      req.GetReason(),
 	}
 	b.decide(sp, b.verdict, b.refusal)
 	b.spends[sp.Id] = sp
+	dep.Spend = sp.Id
+	b.deposits[req.DepositId] = dep
 	return sp, nil
 }
 
@@ -456,28 +477,6 @@ func (b *Bridge) SpendStatus(_ context.Context, req *gamingpb.SpendStatusRequest
 		return &gamingpb.Spend{Id: req.GetId(), State: string(transport.SpendPending)}, nil
 	}
 	return sp, nil
-}
-
-func (b *Bridge) Broadcast(_ context.Context, req *gamingpb.BroadcastRequest) (*gamingpb.BroadcastReply, error) {
-	raw, err := hex.DecodeString(req.GetRawTxHex())
-	if err != nil {
-		return nil, err
-	}
-	var tx wire.MsgTx
-	if err := tx.Deserialize(bytes.NewReader(raw)); err != nil {
-		return nil, err
-	}
-	txid := tx.TxHash().String()
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.sent[txid]++
-	b.rawtx[txid] = raw
-	for i, out := range tx.TxOut {
-		b.utxos[outKey(txid, uint32(i))] = Utxo{
-			PkScript: out.PkScript, Value: out.Value, ConfirmAt: b.height + 1,
-		}
-	}
-	return &gamingpb.BroadcastReply{Txid: txid}, nil
 }
 
 func (b *Bridge) Respond(_ context.Context, req *gamingpb.RespondRequest) (*gamingpb.RespondReply, error) {

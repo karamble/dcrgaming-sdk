@@ -16,7 +16,11 @@ func testCreds(t *testing.T, priv *secp256k1.PrivateKey) membership.Credentials 
 	if err != nil {
 		t.Fatalf("generate bond key: %v", err)
 	}
-	script, err := escrow.BondScript(bond.PubKey().SerializeCompressed(), escrow.MinBondBlocks)
+	recovery, err := secp256k1.GeneratePrivateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := escrow.BridgeBondScript(bond.PubKey().SerializeCompressed(), recovery.PubKey().SerializeCompressed(), 2016)
 	if err != nil {
 		t.Fatalf("bond script: %v", err)
 	}
@@ -38,6 +42,7 @@ func testTerms() membership.Terms {
 		Seats:      2,
 		CSVBlocks:  64,
 		Until:      900000,
+		BondAtoms:  1000000, BondLockBlocks: 2016,
 	}
 }
 

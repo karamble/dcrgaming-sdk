@@ -25,7 +25,7 @@ func stand(t *testing.T, g Rules) (*bridgetest.Bridge, *Runtime, context.CancelF
 	t.Helper()
 	fake := bridgetest.New(bridgetest.Options{
 		Game: g.Identity().GameID, Network: "mainnet",
-		Params: chaincfg.TestNet3Params(), Height: 1000,
+		Params: chaincfg.TestNet3Params(), Height: 800,
 	})
 	srv, err := fake.Serve("seat0")
 	if err != nil {
@@ -49,14 +49,9 @@ func stand(t *testing.T, g Rules) (*bridgetest.Bridge, *Runtime, context.CancelF
 	if err != nil {
 		t.Fatalf("identity: %v", err)
 	}
-	// A join binds to its bond, so a seat must have one before it can join.
-	if err := seed.SetBondDeposit(bondOutpoint); err != nil {
-		t.Fatalf("bond deposit: %v", err)
-	}
 	rt, err := New(Config{
 		Rules: g, Bridge: conn, Book: book,
 		Identity: seed, SeatTags: testTags, Params: chaincfg.TestNet3Params(),
-		PunishTag: []byte("testgame/punishkey/v1"),
 	})
 	if err != nil {
 		t.Fatalf("new: %v", err)
@@ -70,29 +65,6 @@ var testTags = identity.SeatTags{
 	Session: "testgame/table-session/v1",
 	Log:     "testgame/table-log/v1",
 	Bond:    "testgame/bond/v1",
-}
-
-// standWithReclaimFee builds a runtime with a given reclaim fee, for the fee
-// precedence tests.
-func standWithReclaimFee(t *testing.T, fee int64) *Runtime {
-	t.Helper()
-	book, err := spend.OpenBook(spend.MemStore())
-	if err != nil {
-		t.Fatalf("book: %v", err)
-	}
-	seed, err := identity.Load(t.TempDir())
-	if err != nil {
-		t.Fatalf("identity: %v", err)
-	}
-	rt, err := New(Config{
-		Rules: &trivialGame{}, Bridge: &transport.Bridge{}, Book: book,
-		Identity: seed, SeatTags: testTags, Params: chaincfg.TestNet3Params(),
-		ReclaimFeeAtoms: fee,
-	})
-	if err != nil {
-		t.Fatalf("new: %v", err)
-	}
-	return rt
 }
 
 func TestARuntimeNeedsAGameABridgeAndSomewhereToWriteMoneyDown(t *testing.T) {
@@ -141,9 +113,9 @@ type namelessGame struct{ battleshipsRules }
 
 func (namelessGame) Identity() connect.Identity { return connect.Identity{} }
 
-// The plug-in point: a game that implements four methods answers all five of
+// The plug-in point: a game that implements four methods answers every
 // the bridge's control requests, having written no dispatcher.
-func TestAFourMethodGameAnswersAllFiveControlRequests(t *testing.T) {
+func TestAFourMethodGameAnswersAllControlRequests(t *testing.T) {
 	_, rt, _ := stand(t, &trivialGame{})
 	ctx := context.Background()
 
@@ -152,11 +124,6 @@ func TestAFourMethodGameAnswersAllFiveControlRequests(t *testing.T) {
 		req  *gamingpb.BridgeRequest
 		ok   bool
 	}{
-		{"set the payout address", &gamingpb.BridgeRequest{
-			RequestId: "r1",
-			Req: &gamingpb.BridgeRequest_SetPayout{
-				SetPayout: &gamingpb.SetPayoutAddress{Address: "TsPayout"},
-			}}, true},
 		{"set the names", &gamingpb.BridgeRequest{
 			RequestId: "r2",
 			Req: &gamingpb.BridgeRequest_SetNames{
@@ -171,11 +138,9 @@ func TestAFourMethodGameAnswersAllFiveControlRequests(t *testing.T) {
 			Req: &gamingpb.BridgeRequest_AcceptInvite{
 				AcceptInvite: &gamingpb.AcceptInvite{Invite: invite(t, nil), Gcid: testGCID},
 			}}, true},
-		{"reclaim", &gamingpb.BridgeRequest{
+		{"unknown", &gamingpb.BridgeRequest{
 			RequestId: "r5",
-			Req: &gamingpb.BridgeRequest_Reclaim{
-				Reclaim: &gamingpb.Reclaim{Kind: gamingpb.Reclaim_STAKE, Sid: "abcdef01", DestAddr: payTo(t)},
-			}}, false},
+		}, false},
 	} {
 		reply := &gamingpb.RespondRequest{RequestId: tc.req.GetRequestId()}
 		err := rt.doRequest(ctx, tc.req, reply)
@@ -187,9 +152,6 @@ func TestAFourMethodGameAnswersAllFiveControlRequests(t *testing.T) {
 		}
 	}
 
-	if rt.Payout() != "TsPayout" {
-		t.Errorf("the payout address was not kept: %q", rt.Payout())
-	}
 	if rt.Names()["aa"] != "Ann" {
 		t.Errorf("the names were not kept: %v", rt.Names())
 	}
@@ -228,11 +190,11 @@ func TestAGameCanReadTheChainTip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("chain: %v", err)
 	}
-	if got.Height != 1000 || got.Hash == "" {
+	if got.Height != 800 || got.Hash == "" {
 		t.Fatalf("tip is %d/%q", got.Height, got.Hash)
 	}
 	fake.Mine(5)
-	if got, _ = rt.Chain(context.Background()); got.Height != 1005 {
+	if got, _ = rt.Chain(context.Background()); got.Height != 805 {
 		t.Fatalf("after five blocks the tip is %d", got.Height)
 	}
 }
@@ -253,28 +215,6 @@ func TestOnlyATableThisGameIsAtMayAllocateState(t *testing.T) {
 	}
 	if !rt.authorized("m1", "") {
 		t.Fatal("the sender is meant to be ignored, and was not")
-	}
-}
-
-// A forfeiture is refused before the stage that would spend on it exists, so a
-// game integrating now finds out now. One case per verb: none of them is
-// allowed to reach for money on a table this peer is not at.
-func TestAMalformedForfeitureIsRefusedBeforeAnythingIsSpent(t *testing.T) {
-	_, rt, _ := stand(t, &trivialGame{})
-	ctx := context.Background()
-
-	if err := rt.Seize(ctx, "m1", 1, nil); err == nil {
-		t.Fatal("accepted a seizure with no key")
-	}
-	if err := rt.Accuse(ctx, "m1", 1, Lapsed{Seq: 1, By: 900}); err == nil {
-		t.Fatal("accepted an accusation that does not say what was owed")
-	}
-	if err := rt.Accuse(ctx, "m1", 1, Lapsed{Duty: "place", Seq: 1}); err == nil {
-		t.Fatal("accepted an accusation that does not say when the duty lapsed")
-	}
-	// Well formed, but for a table this game is not at.
-	if err := rt.Release(ctx, "m1"); err == nil {
-		t.Fatal("released a bond at a table this game is not at")
 	}
 }
 
@@ -313,9 +253,6 @@ func TestEveryRequestIsAnsweredEvenWhenItFails(t *testing.T) {
 	})
 	rt.answer(ctx, &gamingpb.BridgeRequest{
 		RequestId: "fail1",
-		Req: &gamingpb.BridgeRequest_Reclaim{
-			Reclaim: &gamingpb.Reclaim{Kind: gamingpb.Reclaim_STAKE, Sid: "abcdef01", DestAddr: payTo(t)},
-		},
 	})
 	rt.answer(ctx, &gamingpb.BridgeRequest{RequestId: "unknown1"})
 
@@ -349,7 +286,7 @@ func TestEveryRequestIsAnsweredEvenWhenItFails(t *testing.T) {
 // game that saw a join would be a game that had to know what one was.
 func TestTheRuntimeKeepsItsOwnMessagesFromTheGame(t *testing.T) {
 	_, rt, _ := stand(t, &trivialGame{})
-	for _, k := range []schema.Kind{schema.KindJoin, schema.KindCommit, schema.KindSettle} {
+	for _, k := range []schema.Kind{schema.KindJoin, schema.KindCommit} {
 		if !rt.ours(k) {
 			t.Errorf("%s was left to the game", k)
 		}
@@ -428,37 +365,30 @@ func TestAStateReplyNamesTheRefreshItAnswers(t *testing.T) {
 	}
 }
 
-// A reclaim is not bounded by the console's deadline; every other request is.
-//
-// A reclaim signs and broadcasts real coin. Cutting one off half way because
-// somebody closed a tab leaves money moving with nobody watching it.
-func TestOnlyAReclaimOutrunsTheConsolesDeadline(t *testing.T) {
+// Game-control work is bounded by the console's deadline. Financial work is
+// performed by the bridge and never enters this dispatcher.
+func TestEveryGameControlRequestUsesTheConsolesDeadline(t *testing.T) {
 	soon := time.Now().Add(time.Hour).Unix()
 	at := func(r *gamingpb.BridgeRequest) *gamingpb.BridgeRequest {
 		r.DeadlineUnix = soon
 		return r
 	}
 	for _, tc := range []struct {
-		name  string
-		req   *gamingpb.BridgeRequest
-		bound bool
+		name string
+		req  *gamingpb.BridgeRequest
 	}{
-		{"reclaim", at(&gamingpb.BridgeRequest{Req: &gamingpb.BridgeRequest_Reclaim{
-			Reclaim: &gamingpb.Reclaim{Kind: gamingpb.Reclaim_BOND, DestAddr: "Ts"}}}), false},
 		{"accept an invite", at(&gamingpb.BridgeRequest{Req: &gamingpb.BridgeRequest_AcceptInvite{
-			AcceptInvite: &gamingpb.AcceptInvite{}}}), true},
+			AcceptInvite: &gamingpb.AcceptInvite{}}})},
 		{"report state", at(&gamingpb.BridgeRequest{Req: &gamingpb.BridgeRequest_RefreshState{
-			RefreshState: &gamingpb.RefreshState{}}}), true},
-		{"set the payout address", at(&gamingpb.BridgeRequest{Req: &gamingpb.BridgeRequest_SetPayout{
-			SetPayout: &gamingpb.SetPayoutAddress{}}}), true},
+			RefreshState: &gamingpb.RefreshState{}}})},
 		{"set the names", at(&gamingpb.BridgeRequest{Req: &gamingpb.BridgeRequest_SetNames{
-			SetNames: &gamingpb.SetNames{}}}), true},
+			SetNames: &gamingpb.SetNames{}}})},
 	} {
 		ctx, cancel := ctxFor(context.Background(), tc.req)
 		_, has := ctx.Deadline()
 		cancel()
-		if has != tc.bound {
-			t.Errorf("%s: bounded by the deadline = %v, want %v", tc.name, has, tc.bound)
+		if !has {
+			t.Errorf("%s: request ignored the console deadline", tc.name)
 		}
 	}
 }

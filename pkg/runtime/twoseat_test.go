@@ -3,9 +3,11 @@ package runtime
 import (
 	"context"
 	"encoding/hex"
+	"strings"
 	"testing"
 
 	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/txscript/v4/stdaddr"
 
 	"github.com/karamble/dcrgaming-sdk/pkg/escrow"
@@ -25,6 +27,7 @@ type peer struct {
 	form  *membership.Formation
 	creds membership.Credentials
 	tags  identity.SeatTags
+	bond  []byte
 }
 
 func newPeer(t *testing.T, terms membership.Terms) *peer {
@@ -46,7 +49,7 @@ func newPeer(t *testing.T, terms membership.Terms) *peer {
 	if err != nil {
 		t.Fatalf("their log key: %v", err)
 	}
-	bond, err := seed.DeriveKey(tags.Bond, "")
+	bond, err := seed.DeriveKey(tags.Bond, terms.SID)
 	if err != nil {
 		t.Fatalf("their bond key: %v", err)
 	}
@@ -54,7 +57,8 @@ func newPeer(t *testing.T, terms membership.Terms) *peer {
 	if lock == 0 {
 		lock = escrow.MinBondBlocks
 	}
-	script, err := escrow.BondScript(bond.PubKey().SerializeCompressed(), lock)
+	recovery := secp256k1.PrivKeyFromBytes([]byte("peer bridge recovery authority"))
+	script, err := escrow.BridgeBondScript(bond.PubKey().SerializeCompressed(), recovery.PubKey().SerializeCompressed(), lock)
 	if err != nil {
 		t.Fatalf("their bond script: %v", err)
 	}
@@ -67,7 +71,7 @@ func newPeer(t *testing.T, terms membership.Terms) *peer {
 	if err != nil {
 		t.Fatalf("their formation: %v", err)
 	}
-	return &peer{seed: seed, form: form, creds: creds, tags: tags}
+	return &peer{seed: seed, form: form, creds: creds, tags: tags, bond: script}
 }
 
 // seatTwo forms and seats a real two-seat table on both sides.
@@ -80,25 +84,50 @@ func seatTwo(t *testing.T, fake *bridgetest.Bridge, rt *Runtime) (string, *peer)
 	if err != nil {
 		t.Fatalf("accept: %v", err)
 	}
+	rt.lifeMu.Lock()
+	running := rt.running
+	rt.lifeMu.Unlock()
+	if !running {
+		if err := rt.FundSeatBond(context.Background(), sid); err != nil {
+			t.Fatalf("fund local admission deposit: %v", err)
+		}
+		fake.SetHeight(802)
+		tbl, err := rt.rawTable(sid)
+		if err != nil {
+			t.Fatalf("pending table: %v", err)
+		}
+		if err := rt.formAndJoin(context.Background(), tbl); err != nil {
+			t.Fatalf("join after admission deposit: %v", err)
+		}
+	}
+	waitFor(t, "the local admission deposit", func() bool {
+		if len(fake.Spends()) > 0 && fake.Height() < 802 {
+			fake.SetHeight(802)
+		}
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		return rt.tables[sid] != nil && rt.tables[sid].formation() != nil
+	})
 	rt.mu.Lock()
 	tbl := rt.tables[sid]
 	rt.mu.Unlock()
 
-	them := newPeer(t, tbl.form.Terms())
-	ours, theirs := tbl.form.Ours(), them.form.Ours()
+	them := newPeer(t, tbl.formation().Terms())
+	fake.Place(strings.Repeat("bb22cc33", 8), 1, them.bond, int64(tbl.terms.BondAtoms), fake.Height()-1)
+	ours, theirs := tbl.formation().Ours(), them.form.Ours()
 	if ours == nil || theirs == nil {
 		t.Fatal("a seat has no join of its own")
 	}
-	if err := tbl.form.AddJoin(theirs); err != nil {
+	if err := tbl.formation().AddJoin(theirs); err != nil {
 		t.Fatalf("our side taking their join: %v", err)
 	}
 	if err := them.form.AddJoin(ours); err != nil {
 		t.Fatalf("their side taking our join: %v", err)
 	}
-	tbl.form.CloseWindow()
+	tbl.formation().CloseWindow()
 	them.form.CloseWindow()
 
-	ourA, err := tbl.form.Assertion()
+	ourA, err := tbl.formation().Assertion()
 	if err != nil {
 		t.Fatalf("our assertion: %v", err)
 	}
@@ -107,19 +136,19 @@ func seatTwo(t *testing.T, fake *bridgetest.Bridge, rt *Runtime) (string, *peer)
 		t.Fatalf("their assertion: %v", err)
 	}
 	both := []*membership.Join{ours, theirs}
-	if err := tbl.form.AddAssertion(theirA, both); err != nil {
+	if err := tbl.formation().AddAssertion(theirA, both); err != nil {
 		t.Fatalf("our side taking their assertion: %v", err)
 	}
 	if err := them.form.AddAssertion(ourA, both); err != nil {
 		t.Fatalf("their side taking our assertion: %v", err)
 	}
-	if !tbl.form.Agreed() || !them.form.Agreed() {
+	if !tbl.formation().Agreed() || !them.form.Agreed() {
 		t.Fatalf("the two sides did not agree: ours=%v theirs=%v",
-			tbl.form.Agreed(), them.form.Agreed())
+			tbl.formation().Agreed(), them.form.Agreed())
 	}
 
 	// The beacon is a block hash, so both sides read the same one.
-	want := tbl.form.BeaconHeight()
+	want := tbl.formation().BeaconHeight()
 	fake.SetHeight(int64(want) + 1)
 	if err := rt.seatIfReady(context.Background(), sid); err != nil {
 		t.Fatalf("seat: %v", err)
@@ -131,7 +160,7 @@ func seatTwo(t *testing.T, fake *bridgetest.Bridge, rt *Runtime) (string, *peer)
 	if err := them.form.SetBeacon(raw); err != nil {
 		t.Fatalf("their beacon: %v", err)
 	}
-	if _, ok := tbl.form.Seats(); !ok {
+	if _, ok := tbl.formation().Seats(); !ok {
 		t.Fatal("our side did not seat")
 	}
 	if _, ok := them.form.Seats(); !ok {
@@ -147,7 +176,7 @@ func fundBoth(t *testing.T, fake *bridgetest.Bridge, rt *Runtime, sid string, th
 	tbl := rt.tables[sid]
 	rt.mu.Unlock()
 
-	deposits, err := tbl.form.Deposits(chaincfg.TestNet3Params())
+	deposits, err := tbl.formation().Deposits(chaincfg.TestNet3Params())
 	if err != nil {
 		t.Fatalf("deposits: %v", err)
 	}

@@ -1,119 +1,77 @@
 package schema
 
 import (
+	"net/url"
 	"strings"
 	"testing"
 )
 
-func TestInviteRoundTrips(t *testing.T) {
-	want := Invite{
-		Game: "poker", Kind: InviteKindTable,
-		BuyInAtoms: 10_000_000, Seats: 6, SID: "0123456789abcdef",
-	}
-	link, err := want.String()
-	if err != nil {
-		t.Fatalf("render: %v", err)
-	}
-	got, err := ParseInvite(link)
-	if err != nil {
-		t.Fatalf("parse %q: %v", link, err)
-	}
-	if got != want {
-		t.Fatalf("round trip lost something: %+v != %+v", got, want)
-	}
+func validInvite() Invite {
+	return Invite{Game: "stakewars", Kind: InviteKindTable, SID: "abc123", Seats: 6, BuyInAtoms: 10000000, CSVBlocks: 288, Until: 900, AdmissionAtoms: 1000000, AdmissionBlocks: 2016}
 }
-
-// An invite with no terms is still an invitation, and must stay renderable.
-func TestInviteWithoutTerms(t *testing.T) {
-	link, err := Invite{Game: "poker", Kind: InviteKindTable}.String()
-	if err != nil {
-		t.Fatalf("render: %v", err)
-	}
-	if link != "gaming://poker/table" {
-		t.Fatalf("link is %q", link)
-	}
-	got, err := ParseInvite(link)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if got.BuyInAtoms != 0 || got.Seats != 0 || got.SID != "" {
-		t.Fatalf("terms invented from nothing: %+v", got)
-	}
-}
-
-func TestInviteRejectsMalformed(t *testing.T) {
-	for name, inv := range map[string]Invite{
-		"no game":        {Kind: InviteKindTable},
-		"no kind":        {Game: "poker"},
-		"game not a key": {Game: "Poker!", Kind: InviteKindTable},
-	} {
-		if _, err := inv.String(); err == nil {
-			t.Errorf("%s should not render", name)
+func TestInviteRoundTripsExplicitEconomics(t *testing.T) {
+	for _, bond := range []uint64{0, 2000000} {
+		want := validInvite()
+		want.TableBondAtoms = bond
+		if bond != 0 {
+			want.TableBondBlocks = 300
 		}
-	}
-
-	for name, link := range map[string]string{
-		"another scheme":     "https://poker/table",
-		"no game":            "gaming:///table",
-		"no kind":            "gaming://poker",
-		"buyin not a number": "gaming://poker/table?buyin=lots",
-		"seats not a number": "gaming://poker/table?seats=many",
-		"not a link":         "hello",
-	} {
-		if _, err := ParseInvite(link); err == nil {
-			t.Errorf("%s should not parse: %q", name, link)
+		link, err := want.String()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := ParseInvite(link)
+		if err != nil || got != want {
+			t.Fatalf("roundtrip: %+v %v", got, err)
 		}
 	}
 }
-
-// The host's renderer matches on this shape, so a change here that the host
-// does not follow stops invitations rendering. This pins the literal.
-func TestInviteLinkShapeIsStable(t *testing.T) {
-	link, err := Invite{
-		Game: "poker", Kind: InviteKindTable,
-		BuyInAtoms: 10_000_000, Seats: 6, SID: "abc123",
-	}.String()
-	if err != nil {
-		t.Fatalf("render: %v", err)
+func TestInviteRejectsMissingOrDuplicateTerms(t *testing.T) {
+	link, _ := validInvite().String()
+	for _, field := range []string{"fv", "sid", "buyin", "seats", "csv", "until", "bond", "bondcsv", "tablebond", "tablebondcsv"} {
+		t.Run(field, func(t *testing.T) {
+			u, _ := url.Parse(link)
+			q := u.Query()
+			q.Del(field)
+			u.RawQuery = q.Encode()
+			if _, err := ParseInvite(u.String()); err == nil {
+				t.Fatal("missing financial term accepted")
+			}
+			if _, err := ParseInvite(link + "&" + field + "=1"); err == nil {
+				t.Fatal("duplicate term accepted")
+			}
+		})
 	}
-	const want = "gaming://poker/table?buyin=10000000&seats=6&sid=abc123"
-	if link != want {
-		t.Fatalf("invite link is %q, want %q - the host's parser matches on this", link, want)
+	if _, err := (Invite{Game: "stakewars", Kind: InviteKindTable}).String(); err == nil {
+		t.Fatal("term-free invite accepted")
 	}
 }
-
-// An invitation nobody could act on should be refused when it is read. Left to
-// later, a bad session id fails inside wire.Encode at the moment somebody tries
-// to send their first frame, which is a long way from the mistake.
-func TestInviteRefusesTermsNoTableCouldHave(t *testing.T) {
-	for _, link := range []string{
-		"gaming://poker/table?sid=NOTHEX",
-		"gaming://poker/table?sid=" + strings.Repeat("ab", 17), // 34 chars
-		"gaming://poker/table?seats=1",
-		"gaming://poker/table?seats=7",
-		"gaming://poker/table?csv=0",
-		"gaming://poker/table?csv=soon",
+func TestInviteRejectsInvalidEconomics(t *testing.T) {
+	for name, change := range map[string]func(*Invite){
+		"zero stake":                  func(i *Invite) { i.BuyInAtoms = 0 },
+		"pot overflow":                func(i *Invite) { i.BuyInAtoms = 21000000 * 100000000 },
+		"zero bond":                   func(i *Invite) { i.AdmissionAtoms = 0 },
+		"bond delay overflow":         func(i *Invite) { i.AdmissionBlocks = 65536 },
+		"stake delay overflow":        func(i *Invite) { i.CSVBlocks = 65536 },
+		"missing optional bond delay": func(i *Invite) { i.TableBondAtoms = 1 },
+		"delay without optional bond": func(i *Invite) { i.TableBondBlocks = 1 },
+		"no deadline":                 func(i *Invite) { i.Until = 0 },
+		"too many seats":              func(i *Invite) { i.Seats = 14 },
+		"too few seats":               func(i *Invite) { i.Seats = 1 },
+		"invalid session":             func(i *Invite) { i.SID = "NOTHEX" },
 	} {
-		if inv, err := ParseInvite(link); err == nil {
-			t.Errorf("%s was accepted as %+v", link, inv)
+		t.Run(name, func(t *testing.T) {
+			i := validInvite()
+			change(&i)
+			if _, err := i.String(); err == nil {
+				t.Fatal("invalid terms accepted")
+			}
+		})
+	}
+	link, _ := validInvite().String()
+	for _, malformed := range []string{strings.Replace(link, "fv=2", "fv=1", 1), strings.Replace(link, "gaming://", "https://", 1), link + "#fragment", strings.Replace(link, "csv=288", "csv=soon", 1)} {
+		if _, err := ParseInvite(malformed); err == nil {
+			t.Fatalf("malformed invite accepted: %s", malformed)
 		}
-	}
-}
-
-func TestInviteCarriesTheRefundTimelock(t *testing.T) {
-	inv := Invite{Game: "poker", Kind: "table", BuyInAtoms: 10000000, Seats: 6, SID: "abc123", CSVBlocks: 64}
-	link, err := inv.String()
-	if err != nil {
-		t.Fatalf("render: %v", err)
-	}
-	back, err := ParseInvite(link)
-	if err != nil {
-		t.Fatalf("parse %q: %v", link, err)
-	}
-	if back != inv {
-		t.Fatalf("round trip changed the invite:\n got %+v\nwant %+v", back, inv)
-	}
-	if back.CSVBlocks != 64 {
-		t.Fatalf("refund timelock came back as %d", back.CSVBlocks)
 	}
 }

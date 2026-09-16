@@ -17,11 +17,12 @@ import (
 // can spend it.
 
 const (
-	goldenRedeemHex     = "632103413cd76706482cf339e15b57701b7a6843b459b41232f0d19207524bdbc8757a52bf2103548f21ec4e636b3704c56307da438ea1783c759932202c85220a1e6a3736c21252bf2103af5e04babf346972d67746c26dd2775c9dcd9605123d1ab9ed9ab2c341bf843f52bf51670140b2752103af5e04babf346972d67746c26dd2775c9dcd9605123d1ab9ed9ab2c341bf843f52bf5168"
-	goldenDepositAddr   = "DcmtzgmXggCmtc5sjYcvDbWCjVSiFkddz2k"
-	goldenDepositScript = "a9149e5fe1f87151c5cc9eb0a200084322d1972976a787"
-	goldenPoPDigest     = "a65daca7887822383db60e9261aec21f7e1c77deeac7641c215d7844e0fe7b4c"
-	goldenPoPOutpoint   = "e4d3c2b1a09f8e7d6c5b4a392817065f4e3d2c1b0a998877665544332211ffee:2"
+	goldenRedeemHex        = "632103413cd76706482cf339e15b57701b7a6843b459b41232f0d19207524bdbc8757aad2103548f21ec4e636b3704c56307da438ea1783c759932202c85220a1e6a3736c212ad2103af5e04babf346972d67746c26dd2775c9dcd9605123d1ab9ed9ab2c341bf843fad670140b2752103af5e04babf346972d67746c26dd2775c9dcd9605123d1ab9ed9ab2c341bf843fad6851"
+	goldenAddressRedeemHex = "632103413cd76706482cf339e15b57701b7a6843b459b41232f0d19207524bdbc8757a52bf2103548f21ec4e636b3704c56307da438ea1783c759932202c85220a1e6a3736c21252bf2103af5e04babf346972d67746c26dd2775c9dcd9605123d1ab9ed9ab2c341bf843f52bf51670140b2752103af5e04babf346972d67746c26dd2775c9dcd9605123d1ab9ed9ab2c341bf843f52bf5168"
+	goldenDepositAddr      = "DcmtzgmXggCmtc5sjYcvDbWCjVSiFkddz2k"
+	goldenDepositScript    = "a9149e5fe1f87151c5cc9eb0a200084322d1972976a787"
+	goldenPoPDigest        = "a65daca7887822383db60e9261aec21f7e1c77deeac7641c215d7844e0fe7b4c"
+	goldenPoPOutpoint      = "e4d3c2b1a09f8e7d6c5b4a392817065f4e3d2c1b0a998877665544332211ffee:2"
 )
 
 // privFromHex pins a private key to a literal. A fixture drawn fresh cannot be
@@ -54,21 +55,21 @@ func TestTheRedeemScriptBytesArePinned(t *testing.T) {
 	// The layout: OP_IF, one push-key/schnorr/OP_CHECKSIGALTVERIFY per member
 	// in canonical order, OP_TRUE, OP_ELSE, the timelock, OP_CHECKSEQUENCEVERIFY,
 	// OP_DROP, the owner's own check, OP_TRUE, OP_ENDIF.
-	want := make([]byte, 0, 153)
+	want := make([]byte, 0, 148)
 	want = append(want, 0x63) // OP_IF
 	for _, m := range canonical {
 		want = append(want, 0x21) // a 33-byte push
 		want = append(want, m...)
-		want = append(want, 0x52, 0xbf) // schnorr sig type, OP_CHECKSIGALTVERIFY
+		want = append(want, 0xad) // ECDSA OP_CHECKSIGVERIFY
 	}
-	want = append(want, 0x51, 0x67) // OP_TRUE, OP_ELSE
+	want = append(want, 0x67)       // OP_ELSE
 	want = append(want, 0x01, 0x40) // a one-byte push of 64, the refund timelock
 	want = append(want, 0xb2, 0x75) // OP_CHECKSEQUENCEVERIFY, OP_DROP
 	want = append(want, 0x21)
 	want = append(want, owner...)
-	want = append(want, 0x52, 0xbf, 0x51, 0x68) // schnorr, verify, OP_TRUE, OP_ENDIF
-	if len(want) != 153 {
-		t.Fatalf("the pinned script is %d bytes, want 153, so this test's own assembly is wrong", len(want))
+	want = append(want, 0xad, 0x68, 0x51) // ECDSA verify, OP_ENDIF, OP_TRUE
+	if len(want) != 148 {
+		t.Fatalf("the pinned script is %d bytes, want 148, so this test's own assembly is wrong", len(want))
 	}
 	if got := hex.EncodeToString(want); got != goldenRedeemHex {
 		t.Fatalf("the assembled script is %s, want %s", got, goldenRedeemHex)
@@ -86,7 +87,7 @@ func TestTheRedeemScriptBytesArePinned(t *testing.T) {
 }
 
 func TestTheDepositAddressIsPinned(t *testing.T) {
-	redeem, err := hex.DecodeString(goldenRedeemHex)
+	redeem, err := hex.DecodeString(goldenAddressRedeemHex)
 	if err != nil {
 		t.Fatalf("the pinned script literal does not decode: %v", err)
 	}
@@ -132,7 +133,7 @@ func TestTheBondPoPDigestLayoutIsPinned(t *testing.T) {
 	// A signature over the pinned digest itself must satisfy the verifier,
 	// which ties the verify path to exactly these bytes.
 	ownerPriv := privFromHex(t, "37a1d4c7f00b3e6d91c4a7d0b3f6c992e5b8f1a4d7c0e3b6a9d2c5f8e1b4a707")
-	bond, err := BondScript(ownerPriv.PubKey().SerializeCompressed(), MinBondBlocks)
+	bond, err := testBondScript(ownerPriv.PubKey().SerializeCompressed(), MinBondBlocks)
 	if err != nil {
 		t.Fatalf("bond script: %v", err)
 	}

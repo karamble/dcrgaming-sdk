@@ -9,12 +9,12 @@ require (
 	github.com/decred/dcrd/dcrec v1.0.1
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0
 	// txscript and wire are pinned; the escrow scripts build on these exact
-	// versions and a bump changes bytes guarding live mainnet bonds.
+	// versions; upgrades require reviewing the resulting scripts.
 	github.com/decred/dcrd/txscript/v4 v4.1.1
 	github.com/decred/dcrd/wire v1.7.0
 	github.com/decred/slog v1.2.0
 	// grpc's own go directive is 1.25.0, equal to this module's; bumping grpc
-	// is a toolchain-floor decision for dcrpoker, not a routine update.
+	// changes the minimum Go toolchain for SDK consumers.
 	google.golang.org/grpc v1.83.0
 	google.golang.org/protobuf v1.36.12
 )

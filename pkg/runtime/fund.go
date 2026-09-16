@@ -2,6 +2,9 @@ package runtime
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -45,7 +48,10 @@ func (r *Runtime) Fund(ctx context.Context, match string) error {
 	if !ok {
 		return fmt.Errorf("no table %q", match)
 	}
-	seat, ok := t.form.OurSeat()
+	if t.formation() == nil {
+		return ErrNotSeated
+	}
+	seat, ok := t.formation().OurSeat()
 	if !ok {
 		return fmt.Errorf("this table has not seated us yet")
 	}
@@ -61,7 +67,7 @@ func (r *Runtime) Fund(ctx context.Context, match string) error {
 	if err != nil {
 		return err
 	}
-	terms := t.form.Terms()
+	terms := t.formation().Terms()
 	rec, err := r.askFor(ctx, spend.Record{
 		Match: match, Seat: seat, Purpose: "stake",
 		Address: dep.addr, Atoms: int64(terms.BuyInAtoms), PkScript: dep.pkScript,
@@ -80,7 +86,7 @@ type deposit struct {
 
 // depositFor is the escrow address this seat's stake belongs in.
 func (r *Runtime) depositFor(t *table, seat uint32) (deposit, error) {
-	deposits, err := t.form.Deposits(r.params)
+	deposits, err := t.formation().Deposits(r.params)
 	if err != nil {
 		return deposit{}, err
 	}
@@ -98,10 +104,66 @@ func (r *Runtime) depositFor(t *table, seat uint32) (deposit, error) {
 
 // askFor writes a request down, asks the bridge, and waits for a person.
 func (r *Runtime) askFor(ctx context.Context, want spend.Record) (spend.Record, error) {
-	if err := r.book.Put(want); err != nil {
+	lock := r.fundingLock(want.Match, want.Purpose)
+	lock.Lock()
+	defer lock.Unlock()
+	if err := r.healthy(); err != nil {
 		return spend.Record{}, err
 	}
-	sp, err := r.bridge.RequestSpend(ctx, want.Address, want.Atoms, want.Purpose)
+	r.mu.Lock()
+	table := r.tables[want.Match]
+	recovery := table != nil && table.recoveryOnly
+	r.mu.Unlock()
+	if recovery {
+		existing := false
+		for _, record := range r.book.All() {
+			if record.Match == want.Match && record.Purpose == want.Purpose && record.Seat == want.Seat {
+				existing = true
+			}
+		}
+		if !existing {
+			return spend.Record{}, fmt.Errorf("table is retained for recovery only")
+		}
+	}
+	if err := r.prepareBridgeDeposit(ctx, &want); err != nil {
+		return spend.Record{}, err
+	}
+	terms := r.Terms(want.Match)
+	key, err := r.identity.DeriveKey(r.seatTags.Session, want.Match)
+	if err != nil {
+		return spend.Record{}, err
+	}
+	raw, _ := json.Marshal(struct {
+		Terms                         any
+		Key, Purpose, Script, Address string
+		Atoms                         int64
+	}{terms, hex.EncodeToString(key.PubKey().SerializeCompressed()), want.Purpose, want.PkScript, want.Address, want.Atoms})
+	hash := sha256.Sum256(raw)
+	want.Obligation = hex.EncodeToString(hash[:])
+	old, fresh, err := r.book.Reserve(want)
+	if err != nil {
+		return spend.Record{}, err
+	}
+	if !fresh {
+		if old.ID == "" {
+			return old, ErrUnresolvedPayment
+		}
+		if old.State == spend.Located || old.State == spend.Approved {
+			return old, nil
+		}
+		return r.awaitAnswer(ctx, old.ID)
+	}
+	return r.dispatchSpend(ctx, want)
+}
+
+func (r *Runtime) dispatchSpend(ctx context.Context, want spend.Record) (spend.Record, error) {
+	if err := r.healthy(); err != nil {
+		return spend.Record{}, err
+	}
+	if want.DepositID == "" {
+		return spend.Record{}, fmt.Errorf("verified bridge deposit required")
+	}
+	sp, err := r.bridge.RequestDepositSpend(ctx, want.DepositID, want.Address, want.Atoms, want.Purpose)
 	if err != nil {
 		// The bridge may have taken the request even though the answer did
 		// not come back. The record stays, unidentified, and OpenRecords
@@ -166,7 +228,9 @@ func (r *Runtime) landDeposit(ctx context.Context, t *table, seat uint32, rec sp
 	r.mu.Unlock()
 	// Where a stake landed is the one fact a restart cannot rediscover:
 	// nothing on the chain says which outpoint was this table's.
-	r.keep(t)
+	if err := r.keep(t); err != nil {
+		return err
+	}
 
 	// And the one fact no other seat can discover either. Said as soon as
 	// it is known and repeated every block until the table is funded: the
@@ -191,10 +255,13 @@ func (r *Runtime) findOutput(ctx context.Context, rec spend.Record) (staked, err
 		if err != nil {
 			return staked{}, fmt.Errorf("look for the %s output: %w", rec.Purpose, err)
 		}
-		if !out.Found || !strings.EqualFold(out.PkScriptHex, rec.PkScript) {
+		if !out.Found || out.ValueAtoms != rec.Atoms || !strings.EqualFold(out.PkScriptHex, rec.PkScript) {
 			continue
 		}
 		outpoint := fmt.Sprintf("%s:%d", rec.TxID, vout)
+		if rec.Outpoint != "" && rec.Outpoint != outpoint {
+			continue
+		}
 		if _, err := r.book.Locate(rec.ID, outpoint); err != nil {
 			return staked{}, err
 		}
@@ -223,8 +290,7 @@ func (r *Runtime) SetPayoutFor(match string, seat uint32, payScript []byte) erro
 	r.mu.Unlock()
 	// Every seat announces this once and it goes into the settlement they
 	// all sign, so a restart that lost it cannot settle the table.
-	r.keep(t)
-	return nil
+	return r.keep(t)
 }
 
 // Funded reports where a seat's stake landed, if it has.
@@ -236,30 +302,6 @@ func (r *Runtime) Funded(match string, seat uint32) (outpoint string, atoms int6
 		return "", 0, false
 	}
 	return paidAt(t.funded, seat)
-}
-
-// Bonded reports where a seat's table bond landed, which is what it stakes
-// against staying reachable.
-func (r *Runtime) Bonded(match string, seat uint32) (outpoint string, atoms int64, ok bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	t, found := r.tables[match]
-	if !found {
-		return "", 0, false
-	}
-	return paidAt(t.tableBondFunded, seat)
-}
-
-// ForfeitFunded reports where a seat's forfeitable bond landed, which is what
-// it stakes against telling the truth.
-func (r *Runtime) ForfeitFunded(match string, seat uint32) (outpoint string, atoms int64, ok bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	t, found := r.tables[match]
-	if !found {
-		return "", 0, false
-	}
-	return paidAt(t.forfeitFunded, seat)
 }
 
 // paidAt reads one seat's entry out of a set of paid outputs, and reports a

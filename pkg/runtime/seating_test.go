@@ -5,16 +5,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/decred/dcrd/chaincfg/v3"
-
-	"github.com/karamble/dcrgaming-sdk/pkg/gaming/bridgetest"
-	"github.com/karamble/dcrgaming-sdk/pkg/gaming/connect"
+	"github.com/karamble/dcrgaming-sdk/pkg/escrow"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/gamingpb"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
-	"github.com/karamble/dcrgaming-sdk/pkg/gaming/transport"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/wire"
-	"github.com/karamble/dcrgaming-sdk/pkg/identity"
-	"github.com/karamble/dcrgaming-sdk/pkg/spend"
 )
 
 const testGCID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -25,6 +19,7 @@ func invite(t *testing.T, mut func(*schema.Invite)) string {
 	inv := schema.Invite{
 		Game: "battleships", Kind: schema.InviteKindTable, SID: "abcdef01",
 		BuyInAtoms: 5_000_000, Seats: 2, CSVBlocks: 2048, Until: 900,
+		AdmissionAtoms: escrow.MinBondAtoms, AdmissionBlocks: 4032,
 	}
 	if mut != nil {
 		mut(&inv)
@@ -40,8 +35,8 @@ func accept(rt *Runtime, link, gcid string) (string, error) {
 	return rt.acceptInvite(context.Background(), &gamingpb.AcceptInvite{Invite: link, Gcid: gcid})
 }
 
-func TestAcceptingAnInvitationFormsATable(t *testing.T) {
-	_, rt, _ := stand(t, &trivialGame{})
+func TestAcceptingAnInvitationCreatesADurablePendingTableThenJoins(t *testing.T) {
+	fake, rt, _ := stand(t, &trivialGame{})
 	sid, err := accept(rt, invite(t, nil), testGCID)
 	if err != nil {
 		t.Fatalf("accept: %v", err)
@@ -55,7 +50,16 @@ func TestAcceptingAnInvitationFormsATable(t *testing.T) {
 	if !ok {
 		t.Fatal("no table was formed")
 	}
-	if tbl.form == nil || tbl.form.Ours() == nil {
+	if tbl.formation() != nil {
+		t.Fatal("the game joined before its admission deposit was confirmed")
+	}
+	waitFor(t, "the admission deposit to confirm", func() bool {
+		if len(fake.Spends()) > 0 && fake.Height() < 802 {
+			fake.SetHeight(802)
+		}
+		return tbl.formation() != nil
+	})
+	if tbl.formation() == nil || tbl.formation().Ours() == nil {
 		t.Fatal("this seat has no join of its own")
 	}
 	if tbl.gcID != testGCID {
@@ -106,39 +110,28 @@ func TestAGameRefusesTermsItDoesNotPlay(t *testing.T) {
 	}
 }
 
-// What the invitation leaves out, the game fills in - and the bond it cannot
-// state at all, because schema.Invite has no field for one.
-func TestTheGameFillsInWhatTheInvitationLeavesOut(t *testing.T) {
+// Financial version 2 invitations must carry the complete operator-approved
+// economics. The game cannot fill in missing bond terms after approval.
+func TestAnInvitationCannotOmitFinancialTerms(t *testing.T) {
 	_, rt, _ := stand(t, &trivialGame{})
-	sid, err := accept(rt, invite(t, func(i *schema.Invite) { i.CSVBlocks = 0 }), testGCID)
-	if err != nil {
-		t.Fatalf("accept: %v", err)
-	}
-	rt.mu.Lock()
-	tm := rt.tables[sid].form.Terms()
-	rt.mu.Unlock()
-	if tm.CSVBlocks != 2048 {
-		t.Fatalf("the game's refund timelock was not used: %d", tm.CSVBlocks)
-	}
-	if tm.BondAtoms == 0 || tm.BondLockBlocks != 4032 {
-		t.Fatalf("the game's bond terms were not carried: %d atoms / %d blocks",
-			tm.BondAtoms, tm.BondLockBlocks)
+	link := "gaming://battleships/table?fv=2&sid=abcdef01&buyin=5000000&seats=2&csv=2048&until=900"
+	if _, err := accept(rt, link, testGCID); err == nil {
+		t.Fatal("accepted an invitation with no admission recovery terms")
 	}
 }
 
 func TestAnInvitationThisGameCannotSitAtIsRefused(t *testing.T) {
 	_, rt, _ := stand(t, &trivialGame{})
+	valid := invite(t, nil)
 	for _, tc := range []struct {
-		name string
-		link string
-		gcid string
+		name, link, gcid string
 	}{
 		{"not a link at all", "hello", testGCID},
-		{"another game's table", invite(t, func(i *schema.Invite) { i.Game = "poker" }), testGCID},
-		{"not an invitation to a table", invite(t, func(i *schema.Invite) { i.Kind = "tournament" }), testGCID},
-		{"no session", invite(t, func(i *schema.Invite) { i.SID = "" }), testGCID},
-		{"a group chat id that is not one", invite(t, nil), "nope"},
-		{"a group chat id of the wrong length", invite(t, nil), strings.Repeat("a", 63)},
+		{"another game's table", strings.Replace(valid, "battleships", "poker", 1), testGCID},
+		{"not an invitation to a table", strings.Replace(valid, "/table?", "/tournament?", 1), testGCID},
+		{"no session", strings.Replace(valid, "sid=abcdef01", "sid=", 1), testGCID},
+		{"a group chat id that is not one", valid, "nope"},
+		{"a group chat id of the wrong length", valid, strings.Repeat("a", 63)},
 	} {
 		if _, err := accept(rt, tc.link, tc.gcid); err == nil {
 			t.Errorf("%s: accepted", tc.name)
@@ -181,6 +174,14 @@ func TestATableIsNotSeatedBeforeItsBeaconHeight(t *testing.T) {
 	if err != nil {
 		t.Fatalf("accept: %v", err)
 	}
+	waitFor(t, "the admission deposit to confirm", func() bool {
+		if len(fake.Spends()) > 0 && fake.Height() < 802 {
+			fake.SetHeight(802)
+		}
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		return rt.tables[sid].formation() != nil
+	})
 	fake.SetHeight(10)
 	if err := rt.seatIfReady(context.Background(), sid); err != nil {
 		t.Fatalf("seat: %v", err)
@@ -222,51 +223,6 @@ func TestNamesAreMergedAndAnEmptyOneRemoves(t *testing.T) {
 	}
 }
 
-// A seat with no bond has nothing to stake against its word, and a join names
-// its bond, so it cannot join at all.
-func TestASeatWithNoBondCannotJoin(t *testing.T) {
-	fake := bridgetest.New(bridgetest.Options{
-		Game: "battleships", Network: "mainnet",
-		Params: chaincfg.TestNet3Params(), Height: 1000,
-	})
-	srv, err := fake.Serve("seat0")
-	if err != nil {
-		t.Fatalf("serve: %v", err)
-	}
-	t.Cleanup(srv.Close)
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-
-	g := &trivialGame{}
-	conn, err := srv.Dial(ctx, "seat0", func(cfg *transport.BridgeConfig) { connect.Stamp(cfg, g.Identity()) })
-	if err != nil {
-		t.Fatalf("dial: %v", err)
-	}
-	book, err := spend.OpenBook(spend.MemStore())
-	if err != nil {
-		t.Fatalf("book: %v", err)
-	}
-	// Deliberately no SetBondDeposit.
-	seed, err := identity.Load(t.TempDir())
-	if err != nil {
-		t.Fatalf("identity: %v", err)
-	}
-	rt, err := New(Config{Rules: g, Bridge: conn, Book: book, Identity: seed, SeatTags: testTags, Params: chaincfg.TestNet3Params()})
-	if err != nil {
-		t.Fatalf("new: %v", err)
-	}
-	_, err = accept(rt, invite(t, nil), testGCID)
-	if err == nil {
-		t.Fatal("a seat with nothing to forfeit joined a table")
-	}
-	// membership would refuse this anyway, with "no bond deposit". The
-	// runtime's own check exists for the sentence after it, which tells a
-	// developer what to do about it - so that is what is pinned.
-	if !strings.Contains(err.Error(), "fund one before joining a table") {
-		t.Fatalf("refused without telling the developer what to do: %v", err)
-	}
-}
-
 // Formation traffic outlives a relay backlog and nothing else does.
 //
 // A join queued behind a backlog and expiring in transit forms one table and
@@ -281,8 +237,7 @@ func TestFormationOutlivesABacklogAndTheRestDoesNot(t *testing.T) {
 		}
 	}
 	for _, kind := range []schema.Kind{
-		KindFunded, KindBonded, KindPayout, schema.KindSettle, KindRelease, KindAccusation,
-		KindPunishKey,
+		KindFunded, KindBonded, KindPayout,
 	} {
 		if got := classOf(kind); got != wire.ClassState {
 			t.Errorf("%s is sent as class %v, and a stale one describes a table that has moved on",

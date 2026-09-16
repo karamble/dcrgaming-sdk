@@ -8,21 +8,21 @@ import "testing"
 // so both builders have to refuse rather than hand back a script that looks
 // perfectly well formed.
 func TestATimelockNothingCouldEverSpendIsRefused(t *testing.T) {
-	_, pubs := memberKeys(t, 1)
+	_, pubs := memberKeys(t, 2)
 	owner := pubs[0]
 
-	if _, err := RedeemScript(owner, [][]byte{owner}, MaxCSVBlocks+1); err == nil {
+	if _, err := RedeemScript(owner, pubs, MaxCSVBlocks+1); err == nil {
 		t.Fatal("built an escrow whose refund branch no sequence could satisfy")
 	}
-	if _, err := BondScript(owner, MaxCSVBlocks+1); err == nil {
+	if _, err := testBondScript(owner, MaxCSVBlocks+1); err == nil {
 		t.Fatal("built a bond no sequence could ever reclaim")
 	}
 
 	// The boundary itself is spendable and must stay allowed.
-	if _, err := RedeemScript(owner, [][]byte{owner}, MaxCSVBlocks); err != nil {
+	if _, err := RedeemScript(owner, pubs, MaxCSVBlocks); err != nil {
 		t.Fatalf("refused the largest lock that can actually be spent: %v", err)
 	}
-	if _, err := BondScript(owner, MaxCSVBlocks); err != nil {
+	if _, err := testBondScript(owner, MaxCSVBlocks); err != nil {
 		t.Fatalf("refused the largest bond lock that can actually be spent: %v", err)
 	}
 }

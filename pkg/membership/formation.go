@@ -3,6 +3,7 @@ package membership
 import (
 	"encoding/hex"
 	"fmt"
+	"sync"
 
 	"github.com/decred/dcrd/txscript/v4/stdaddr"
 	"github.com/karamble/dcrgaming-sdk/pkg/escrow"
@@ -65,6 +66,7 @@ func (s State) String() string {
 // no membership at all and stays silent, so being under-informed is
 // self-evident rather than indistinguishable from being well-informed.
 type Formation struct {
+	mu    sync.Mutex
 	terms Terms
 	creds Credentials
 	self  []byte // our own compressed session key
@@ -103,28 +105,28 @@ func NewFormation(t Terms, c Credentials) (*Formation, error) {
 		commits: make(map[string]*Commit),
 		asserts: make(map[string][32]byte),
 	}
-	if err := f.AddJoin(ours); err != nil {
+	if err := f.lockedAddJoin(ours); err != nil {
 		return nil, err
 	}
 	return f, nil
 }
 
 // Terms reports what this table was formed under.
-func (f *Formation) Terms() Terms { return f.terms }
+func (f *Formation) lockedTerms() Terms { return f.terms }
 
 // State reports where forming has got to.
-func (f *Formation) State() State { return f.state }
+func (f *Formation) lockedState() State { return f.state }
 
 // Reason explains an abort, for a person rather than for code.
-func (f *Formation) Reason() string { return f.reason }
+func (f *Formation) lockedReason() string { return f.reason }
 
 // Ours is this peer's own join, the one to publish.
-func (f *Formation) Ours() *Join { return f.joins[keyID(f.self)] }
+func (f *Formation) lockedOurs() *Join { return f.joins[keyID(f.self)] }
 
 // Joins reports every verified join held, in canonical key order. This is what
 // a roster assertion carries, so a peer that missed one can learn it from
 // anyone who did and check it rather than take their word.
-func (f *Formation) Joins() []*Join {
+func (f *Formation) lockedJoins() []*Join {
 	out := make([]*Join, 0, len(f.joins))
 	for _, k := range sortKeys(f.keys()) {
 		out = append(out, f.joins[keyID(k)])
@@ -138,7 +140,7 @@ func (f *Formation) Joins() []*Join {
 // from every member, and a commit that only ever lived in memory leaves a table
 // that had already agreed unable to say so - it waits for a message that was
 // sent once and will not be sent again.
-func (f *Formation) Commits() []*Commit {
+func (f *Formation) lockedCommits() []*Commit {
 	keys := make([][]byte, 0, len(f.commits))
 	for _, c := range f.commits {
 		keys = append(keys, c.Signer)
@@ -160,7 +162,7 @@ func (f *Formation) Commits() []*Commit {
 // The height is not read here. Formation stays a pure function of what it has
 // been told, so the one thing that has to consult a clock or a chain is the
 // caller - and it can be tested by saying so directly.
-func (f *Formation) CloseWindow() {
+func (f *Formation) lockedCloseWindow() {
 	if f.closed || f.state == Aborted || f.state == Settled {
 		return
 	}
@@ -174,7 +176,7 @@ func (f *Formation) CloseWindow() {
 }
 
 // WindowClosed reports whether admission has shut.
-func (f *Formation) WindowClosed() bool { return f.closed }
+func (f *Formation) lockedWindowClosed() bool { return f.closed }
 
 // Agreed reports whether every member of this peer's membership has said it
 // holds the same one.
@@ -184,7 +186,7 @@ func (f *Formation) WindowClosed() bool { return f.closed }
 // only the deadline is that - but it does mean every member has seen exactly
 // this set, which is enough to bind on when the alternative is a lobby nobody
 // is watching for ten minutes.
-func (f *Formation) Agreed() bool {
+func (f *Formation) lockedAgreed() bool {
 	if f.canonical == nil {
 		return false
 	}
@@ -202,7 +204,7 @@ func (f *Formation) Agreed() bool {
 // The joins are what make the claim checkable, and they are checked before any
 // is kept: rejection has to be wholesale, or a member could get a key nobody
 // joined with admitted by burying it among real ones.
-func (f *Formation) AddAssertion(a *Assertion, joins []*Join) error {
+func (f *Formation) lockedAddAssertion(a *Assertion, joins []*Join) error {
 	if f.state == Aborted || f.state == Settled {
 		return nil
 	}
@@ -223,7 +225,7 @@ func (f *Formation) AddAssertion(a *Assertion, joins []*Join) error {
 
 	f.asserts[keyID(a.Signer)] = a.Roster
 	for _, j := range joins {
-		if err := f.AddJoin(j); err != nil {
+		if err := f.lockedAddJoin(j); err != nil {
 			return err
 		}
 	}
@@ -237,7 +239,7 @@ func (f *Formation) AddAssertion(a *Assertion, joins []*Join) error {
 // A join that fails to verify is refused and changes nothing. That matters most
 // for relayed ones: rejection has to be wholesale, or a member could inject a
 // key nobody joined with by burying it among real joins.
-func (f *Formation) AddJoin(j *Join) error {
+func (f *Formation) lockedAddJoin(j *Join) error {
 	if f.state == Aborted || f.state == Settled {
 		return nil
 	}
@@ -277,7 +279,7 @@ func (f *Formation) AddJoin(j *Join) error {
 // the joins they were computed from may still be in flight. What cannot be
 // accepted is a second, different commit from a key that already made one -
 // that is a contradiction, and it ends the table with the proof retained.
-func (f *Formation) AddCommit(c *Commit) error {
+func (f *Formation) lockedAddCommit(c *Commit) error {
 	if f.state == Aborted {
 		return nil
 	}
@@ -316,7 +318,7 @@ func (f *Formation) AddCommit(c *Commit) error {
 // risks binding to a membership a late join would have aborted, and binding
 // late risks the table never forming at all. What this type guarantees is that
 // once bound, nothing moves it.
-func (f *Formation) Bind() (*Commit, error) {
+func (f *Formation) lockedBind() (*Commit, error) {
 	switch f.state {
 	case Committed, Settled:
 		return f.commits[keyID(f.self)], nil
@@ -340,7 +342,7 @@ func (f *Formation) Bind() (*Commit, error) {
 // Making one records it, because this peer's own view counts toward agreement
 // exactly as anyone else's does - and a caller that had to remember to file its
 // own would eventually not.
-func (f *Formation) Assertion() (*Assertion, error) {
+func (f *Formation) lockedAssertion() (*Assertion, error) {
 	if f.canonical == nil {
 		return nil, fmt.Errorf("no membership to assert yet")
 	}
@@ -355,7 +357,7 @@ func (f *Formation) Assertion() (*Assertion, error) {
 // Members reports the membership in canonical key order, which is the order
 // every escrow script names them in and the order signatures are supplied in.
 // It is available from Formed onwards.
-func (f *Formation) Members() ([][]byte, bool) {
+func (f *Formation) lockedMembers() ([][]byte, bool) {
 	if f.canonical == nil {
 		return nil, false
 	}
@@ -369,7 +371,7 @@ func (f *Formation) Members() ([][]byte, bool) {
 // The caller reads it, because Formation touches no chain. What it must not do
 // is read it early: the block has to be one that did not exist when the members
 // were choosing their keys, or the draw is something a player can grind.
-func (f *Formation) SetBeacon(hash []byte) error {
+func (f *Formation) lockedSetBeacon(hash []byte) error {
 	if len(hash) == 0 {
 		return fmt.Errorf("no beacon")
 	}
@@ -383,10 +385,10 @@ func (f *Formation) SetBeacon(hash []byte) error {
 }
 
 // BeaconHeight is the block this table draws its seating from.
-func (f *Formation) BeaconHeight() uint32 { return BeaconHeight(f.terms) }
+func (f *Formation) lockedBeaconHeight() uint32 { return BeaconHeight(f.terms) }
 
 // Seated reports whether the seating has been drawn.
-func (f *Formation) Seated() bool { return f.beacon != nil && f.canonical != nil }
+func (f *Formation) lockedSeated() bool { return f.beacon != nil && f.canonical != nil }
 
 // Beacon is the block hash the seating was drawn from, or nil before the draw.
 //
@@ -394,7 +396,7 @@ func (f *Formation) Seated() bool { return f.beacon != nil && f.canonical != nil
 // terms, so a restart could fetch the block again, but only while that block is
 // still the one at that height. Storing what was actually drawn from means a
 // reorganisation cannot quietly reseat a table that has already been dealt.
-func (f *Formation) Beacon() []byte {
+func (f *Formation) lockedBeacon() []byte {
 	if f.beacon == nil {
 		return nil
 	}
@@ -409,8 +411,8 @@ func (f *Formation) Beacon() []byte {
 // escrow.CanonicalMembers says of its own ordering that it holds "regardless of
 // seat assignment". The two were only ever the same thing for want of anything
 // better to be the other.
-func (f *Formation) Seats() (map[uint32][]byte, bool) {
-	if !f.Seated() {
+func (f *Formation) lockedSeats() (map[uint32][]byte, bool) {
+	if !f.lockedSeated() {
 		return nil, false
 	}
 	seats, err := SeatOrder(f.roster, f.beacon, f.canonical)
@@ -435,8 +437,8 @@ func (f *Formation) Seats() (map[uint32][]byte, bool) {
 // log key, which makes the join itself the binding: nothing here is taken on
 // anybody's word, and there is no second message to go missing on a channel
 // that loses messages.
-func (f *Formation) LogSeats() (map[uint32][]byte, bool) {
-	seats, ok := f.Seats()
+func (f *Formation) lockedLogSeats() (map[uint32][]byte, bool) {
+	seats, ok := f.lockedSeats()
 	if !ok {
 		return nil, false
 	}
@@ -456,17 +458,10 @@ func (f *Formation) LogSeats() (map[uint32][]byte, bool) {
 // Empty until the seating is drawn, for the same reason the deposits are: the
 // bonds name the membership, and a membership that could still change is one
 // nobody should be paying into.
-func (f *Formation) TableBonds(params stdaddr.AddressParams) ([]TableBond, error) {
-	seats, ok := f.Seats()
-	if !ok {
-		return nil, fmt.Errorf("this table has no seating yet")
-	}
-	return TableBonds(seats, params)
-}
 
 // OurSeat reports which seat this peer holds.
-func (f *Formation) OurSeat() (uint32, bool) {
-	seats, ok := f.Seats()
+func (f *Formation) lockedOurSeat() (uint32, bool) {
+	seats, ok := f.lockedSeats()
 	if !ok {
 		return 0, false
 	}
@@ -491,8 +486,8 @@ func (f *Formation) OurSeat() (uint32, bool) {
 // roster it was sent, to check the two matched - because a referee that swapped
 // in a key of its own would otherwise collect the table. Here nobody is handed
 // anything, which removes that check by removing the party that could be wrong.
-func (f *Formation) Deposits(params stdaddr.AddressParams) ([]Deposit, error) {
-	seats, ok := f.Seats()
+func (f *Formation) lockedDeposits(params stdaddr.AddressParams) ([]Deposit, error) {
+	seats, ok := f.lockedFundingSeats()
 	if !ok {
 		return nil, fmt.Errorf("this table has no seating yet")
 	}
@@ -512,7 +507,7 @@ func (f *Formation) Deposits(params stdaddr.AddressParams) ([]Deposit, error) {
 }
 
 // RosterHash is what a commit binds to. Available from Formed onwards.
-func (f *Formation) RosterHash() ([32]byte, bool) {
+func (f *Formation) lockedRosterHash() ([32]byte, bool) {
 	if f.canonical == nil {
 		return [32]byte{}, false
 	}
@@ -527,7 +522,7 @@ func (f *Formation) RosterHash() ([32]byte, bool) {
 // groups that somehow formed different tables under one invitation would
 // collide on it. The roster hash cannot collide, because it is what they
 // disagreed about.
-func (f *Formation) MatchID() (string, bool) {
+func (f *Formation) lockedMatchID() (string, bool) {
 	if f.canonical == nil {
 		return "", false
 	}
@@ -537,12 +532,12 @@ func (f *Formation) MatchID() (string, bool) {
 // Roster renders the settled membership in the shape the escrow layer wants.
 // It needs the seating as well as the agreement, so it is empty until the
 // beacon has been drawn.
-func (f *Formation) Roster() (*Roster, bool) {
-	seats, ok := f.Seats()
+func (f *Formation) lockedRoster() (*Roster, bool) {
+	seats, ok := f.lockedSeats()
 	if !ok || f.state != Settled {
 		return nil, false
 	}
-	members, _ := f.Members()
+	members, _ := f.lockedMembers()
 	return &Roster{
 		Size:    int(f.terms.Seats),
 		Seats:   seats,
@@ -552,7 +547,7 @@ func (f *Formation) Roster() (*Roster, bool) {
 }
 
 // Conflict returns the proof that ended the table, if that is what ended it.
-func (f *Formation) Conflict() *ConflictingCommits { return f.conflict }
+func (f *Formation) lockedConflict() *ConflictingCommits { return f.conflict }
 
 // recompute advances the state machine after anything was admitted.
 func (f *Formation) recompute() {
@@ -619,7 +614,7 @@ func (f *Formation) recompute() {
 // needs the table settled. Anything before Committed has its own way of
 // ending, and anything after Settled has money moving under rules this does
 // not know.
-func (f *Formation) Abandon(reason string) {
+func (f *Formation) lockedAbandon(reason string) {
 	if f.state != Settled && f.state != Committed {
 		return
 	}
@@ -639,4 +634,129 @@ func (f *Formation) keys() [][]byte {
 		out = append(out, j.Key)
 	}
 	return out
+}
+
+func (f *Formation) Terms() Terms       { f.mu.Lock(); defer f.mu.Unlock(); return f.lockedTerms() }
+func (f *Formation) State() State       { f.mu.Lock(); defer f.mu.Unlock(); return f.lockedState() }
+func (f *Formation) Reason() string     { f.mu.Lock(); defer f.mu.Unlock(); return f.lockedReason() }
+func (f *Formation) Ours() *Join        { f.mu.Lock(); defer f.mu.Unlock(); return f.lockedOurs() }
+func (f *Formation) Joins() []*Join     { f.mu.Lock(); defer f.mu.Unlock(); return f.lockedJoins() }
+func (f *Formation) Commits() []*Commit { f.mu.Lock(); defer f.mu.Unlock(); return f.lockedCommits() }
+func (f *Formation) CloseWindow()       { f.mu.Lock(); defer f.mu.Unlock(); f.lockedCloseWindow() }
+func (f *Formation) WindowClosed() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lockedWindowClosed()
+}
+func (f *Formation) Agreed() bool { f.mu.Lock(); defer f.mu.Unlock(); return f.lockedAgreed() }
+func (f *Formation) AddAssertion(a *Assertion, joins []*Join) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lockedAddAssertion(a, joins)
+}
+func (f *Formation) AddJoin(j *Join) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lockedAddJoin(j)
+}
+func (f *Formation) AddCommit(c *Commit) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lockedAddCommit(c)
+}
+func (f *Formation) Bind() (*Commit, error) { f.mu.Lock(); defer f.mu.Unlock(); return f.lockedBind() }
+func (f *Formation) Assertion() (*Assertion, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lockedAssertion()
+}
+func (f *Formation) Members() ([][]byte, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lockedMembers()
+}
+func (f *Formation) SetBeacon(hash []byte) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lockedSetBeacon(hash)
+}
+func (f *Formation) BeaconHeight() uint32 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lockedBeaconHeight()
+}
+func (f *Formation) Seated() bool   { f.mu.Lock(); defer f.mu.Unlock(); return f.lockedSeated() }
+func (f *Formation) Beacon() []byte { f.mu.Lock(); defer f.mu.Unlock(); return f.lockedBeacon() }
+func (f *Formation) Seats() (map[uint32][]byte, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lockedSeats()
+}
+func (f *Formation) LogSeats() (map[uint32][]byte, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lockedLogSeats()
+}
+
+func (f *Formation) OurSeat() (uint32, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lockedOurSeat()
+}
+func (f *Formation) Deposits(params stdaddr.AddressParams) ([]Deposit, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lockedDeposits(params)
+}
+func (f *Formation) RosterHash() ([32]byte, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lockedRosterHash()
+}
+func (f *Formation) MatchID() (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lockedMatchID()
+}
+func (f *Formation) Roster() (*Roster, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lockedRoster()
+}
+func (f *Formation) Conflict() *ConflictingCommits {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lockedConflict()
+}
+func (f *Formation) Abandon(reason string) { f.mu.Lock(); defer f.mu.Unlock(); f.lockedAbandon(reason) }
+
+// FundingSeats names financial authority, separate from the game/log identities.
+// Every member must bind an independent bridge-controlled spending key.
+func (f *Formation) FundingSeats() (map[uint32][]byte, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lockedFundingSeats()
+}
+func (f *Formation) lockedFundingSeats() (map[uint32][]byte, bool) {
+	seats, ok := f.lockedSeats()
+	if !ok {
+		return nil, false
+	}
+	out := make(map[uint32][]byte, len(seats))
+	for seat, key := range seats {
+		j := f.joins[keyID(key)]
+		if j == nil {
+			return nil, false
+		}
+		terms, err := escrow.ParseBond(j.Bond.Script)
+		if err != nil {
+			return nil, false
+		}
+		if len(terms.Recovery) != 0 {
+			out[seat] = append([]byte(nil), terms.Recovery...)
+		} else {
+			return nil, false
+		}
+	}
+	return out, true
 }

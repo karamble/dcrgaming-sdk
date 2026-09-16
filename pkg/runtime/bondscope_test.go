@@ -56,8 +56,6 @@ func standPerTable(t *testing.T) (*bridgetest.Bridge, *Runtime) {
 	rt, err := New(Config{
 		Rules: g, Bridge: conn, Book: book, Tables: NewMemTableStore(),
 		Identity: seed, SeatTags: testTags, Params: chaincfg.TestNet3Params(),
-		PunishTag: []byte("testgame/punishkey/v1"),
-		BondScope: BondPerTable,
 	})
 	if err != nil {
 		t.Fatalf("new: %v", err)
@@ -88,6 +86,9 @@ func TestAGameThatBondsPerTableNeedsNoIdentityDeposit(t *testing.T) {
 	// Accepted, and not yet joined: the bond it will join with is still
 	// being paid for.
 	waitFor(t, "the table to join once its bond lands", func() bool {
+		if len(fake.Spends()) > 0 && fake.Height() < 802 {
+			fake.SetHeight(802)
+		}
 		_, err := rt.tableOf(sid)
 		return err == nil
 	})
@@ -97,7 +98,7 @@ func TestAGameThatBondsPerTableNeedsNoIdentityDeposit(t *testing.T) {
 		t.Fatalf("table: %v", err)
 	}
 	// The join binds to the bond this table paid, not to an identity's.
-	ours := tbl.form.Ours()
+	ours := tbl.formation().Ours()
 	if ours == nil {
 		t.Fatal("this seat has no join")
 	}
@@ -133,65 +134,17 @@ func TestAGameThatBondsPerTableNeedsNoIdentityDeposit(t *testing.T) {
 	}
 }
 
-// The two scopes derive different keys, and each opens what it should.
-//
-// A key derived the wrong way builds a script the coin was never paid into, so
-// the bond is real, unspendable, and bound to a join nobody can honour.
-func TestEachBondScopeDerivesItsOwnKey(t *testing.T) {
-	_, perTable := standPerTable(t)
-	_, perIdentity, _ := stand(t, &trivialGame{})
-
-	sid := "abcdef01"
-	a, err := perTable.seatBondKeyFor(sid)
-	if err != nil {
-		t.Fatalf("per table: %v", err)
-	}
-	withoutSID, err := perTable.identity.DeriveKey(perTable.seatTags.Bond, "")
-	if err != nil {
-		t.Fatalf("derive: %v", err)
-	}
-	if a.PubKey().IsEqual(withoutSID.PubKey()) {
-		t.Fatal("a per-table bond key does not depend on the table")
-	}
-
-	b, err := perIdentity.seatBondKeyFor(sid)
-	if err != nil {
-		t.Fatalf("per identity: %v", err)
-	}
-	plain, err := perIdentity.identity.DeriveKey(perIdentity.seatTags.Bond, "")
-	if err != nil {
-		t.Fatalf("derive: %v", err)
-	}
-	if !b.PubKey().IsEqual(plain.PubKey()) {
-		t.Fatal("a per-identity bond key depends on the table, so it opens nothing")
-	}
-}
-
-// A game that bonds per identity is not asked to fund a table's bond, because
-// there is no such thing to fund.
-func TestFundingATableBondIsRefusedWhereBondsArePerIdentity(t *testing.T) {
-	_, rt, _ := stand(t, &trivialGame{})
-	sid, err := accept(rt, invite(t, nil), testGCID)
-	if err != nil {
-		t.Fatalf("accept: %v", err)
-	}
-	err = rt.FundSeatBond(context.Background(), sid)
-	if err == nil {
-		t.Fatal("a per-identity game funded a per-table bond")
-	}
-	if !strings.Contains(err.Error(), "one bond per identity") {
-		t.Fatalf("refused for the wrong reason: %v", err)
-	}
-}
-
 // A table that has not joined yet is still a table, and a restart finds it.
 func TestATableStillPayingForItsSeatSurvivesARestart(t *testing.T) {
-	_, rt := standPerTable(t)
+	fake, rt := standPerTable(t)
 	sid, err := rt.AcceptInvite(context.Background(), invite(t, nil), testGCID)
 	if err != nil {
 		t.Fatalf("accept: %v", err)
 	}
 	waitFor(t, "the table to join", func() bool {
+		if len(fake.Spends()) > 0 && fake.Height() < 802 {
+			fake.SetHeight(802)
+		}
 		_, err := rt.tableOf(sid)
 		return err == nil
 	})
@@ -212,7 +165,7 @@ func TestATableStillPayingForItsSeatSurvivesARestart(t *testing.T) {
 		recs[0].SeatBond.Atoms != int64(tbl.terms.BondAtoms) {
 		t.Fatalf("the seat bond is recorded as %d atoms", recs[0].SeatBond.Atoms)
 	}
-	if _, ok := tbl.form.Seats(); ok {
+	if _, ok := tbl.formation().Seats(); ok {
 		t.Fatal("a table with one join reports seating")
 	}
 }

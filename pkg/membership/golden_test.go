@@ -14,8 +14,8 @@ import (
 // only fail here, before it strands every table formed under the old layout.
 
 const (
-	goldenTermsHash  = "398a281024e3fb3ae4991517f6db469e8c4cddfd2b63ac20dffa78e1590e94ad"
-	goldenRosterHash = "cb3ad6fe2b038e666d11fa210435f082dcd38aa6f71e9412aa7536295a2da340"
+	goldenTermsHash  = "b2a750cc1011337db6f004460548052e2ba0b0e0115deddd281503a08836c0f4"
+	goldenRosterHash = "ec8b3c414fc4276f8a9f7b505d29df74495d257bc1bb03056e5e2fae60175496"
 )
 
 // goldenTerms is the fixed table the pins are derived from. Every field is an
@@ -29,6 +29,7 @@ func goldenTerms() Terms {
 		Seats:      2,
 		CSVBlocks:  144,
 		Until:      987654,
+		BondAtoms:  1000000, BondLockBlocks: 2016,
 	}
 }
 
@@ -36,7 +37,7 @@ func goldenTerms() Terms {
 // strings be32-length-prefixed, the game version widened to a big-endian
 // int64, every other number at its declared width.
 func goldenTermsPreimage() []byte {
-	pre := make([]byte, 0, 78)
+	pre := make([]byte, 0, 132)
 	pre = append(pre, "gaming/table/terms/v1"...)
 	pre = append(pre, 0x00, 0x00, 0x00, 0x05) // be32(5), the game name's length
 	pre = append(pre, "poker"...)
@@ -47,6 +48,10 @@ func goldenTermsPreimage() []byte {
 	pre = append(pre, 0x00, 0x00, 0x00, 0x02)                         // be32(2), the seats
 	pre = append(pre, 0x00, 0x00, 0x00, 0x90)                         // be32(144), the refund timelock
 	pre = append(pre, 0x00, 0x0f, 0x12, 0x06)                         // be32(987654), the admission deadline
+	pre = append(pre, "gaming/table/bond-terms/v1"...)
+	pre = append(pre, 0, 0, 0, 0, 0, 0x0f, 0x42, 0x40) // bond amount 1,000,000
+	pre = append(pre, 0, 0, 0x07, 0xe0)                // bond delay 2016
+	pre = append(pre, make([]byte, 16)...)             // unused accusation fields, both zero
 	return pre
 }
 
@@ -63,8 +68,8 @@ func privFromHex(t *testing.T, s string) *secp256k1.PrivateKey {
 
 func TestTheTermsHashLayoutIsPinned(t *testing.T) {
 	pre := goldenTermsPreimage()
-	if len(pre) != 78 {
-		t.Fatalf("the pinned preimage is %d bytes, want 78, so this test's own assembly is wrong", len(pre))
+	if len(pre) != 132 {
+		t.Fatalf("the pinned preimage is %d bytes, want 132, so this test's own assembly is wrong", len(pre))
 	}
 	sum := blake256.Sum256(pre)
 	if got := hex.EncodeToString(sum[:]); got != goldenTermsHash {

@@ -2,6 +2,7 @@ package membership
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"strings"
 	"testing"
@@ -21,6 +22,7 @@ func testTerms(seats uint32) Terms {
 		Seats:      seats,
 		CSVBlocks:  64,
 		Until:      900000,
+		BondAtoms:  1000000, BondLockBlocks: 2016,
 	}
 }
 
@@ -56,7 +58,9 @@ func testCreds(t *testing.T, priv *secp256k1.PrivateKey) Credentials {
 	if err != nil {
 		t.Fatalf("generate bond key: %v", err)
 	}
-	script, err := escrow.BondScript(bond.PubKey().SerializeCompressed(), escrow.MinBondBlocks)
+	seed := sha256.Sum256(append(priv.Serialize(), []byte("test-financial-key")...))
+	recovery := secp256k1.PrivKeyFromBytes(seed[:])
+	script, err := escrow.BridgeBondScript(bond.PubKey().SerializeCompressed(), recovery.PubKey().SerializeCompressed(), 2016)
 	if err != nil {
 		t.Fatalf("bond script: %v", err)
 	}
@@ -843,7 +847,9 @@ func TestABondLockedTooBrieflyIsRefused(t *testing.T) {
 	}
 	// BondScript itself refuses a short lock, so the script has to be built
 	// at the minimum and the join checked against a raised one.
-	script, err := escrow.BondScript(bond.PubKey().SerializeCompressed(), escrow.MinBondBlocks)
+	seed := sha256.Sum256(append(priv.Serialize(), []byte("test-financial-key")...))
+	recovery := secp256k1.PrivKeyFromBytes(seed[:])
+	script, err := escrow.BridgeBondScript(bond.PubKey().SerializeCompressed(), recovery.PubKey().SerializeCompressed(), 2016)
 	if err != nil {
 		t.Fatalf("bond script: %v", err)
 	}

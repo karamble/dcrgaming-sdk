@@ -92,9 +92,12 @@ type Bridge struct {
 
 	// mu guards where the stream has got to, which the next Subscribe sends
 	// back so the bridge can tell a clean reconnect from a lossy one.
-	mu      sync.Mutex
-	epoch   string
-	lastSeq uint64
+	mu            sync.Mutex
+	epoch         string
+	lastSeq       uint64
+	status        ConnectionState
+	statusChanged chan struct{}
+	streamStarted bool
 }
 
 // requestBuffer is how many operator requests may queue before one is dropped.
@@ -216,15 +219,19 @@ func (c *Bridge) Network() string { return c.network }
 // real money into them, so a mismatch here has to stop the program.
 func (c *Bridge) Hello(ctx context.Context, network string) (*gamingpb.HelloReply, error) {
 	reply, err := c.rpc.Hello(ctx, &gamingpb.HelloRequest{
-		GameId:              c.cfg.GameID,
-		GameProtocolVersion: uint32(c.cfg.GameVer),
-		ClientVersion:       c.cfg.ClientVersion,
-		Capabilities:        c.cfg.Capabilities,
-		MinRefundBlocks:     c.cfg.MinRefundBlocks,
-		BondLockBlocks:      c.cfg.BondLockBlocks,
+		GameId:                c.cfg.GameID,
+		BridgeContractVersion: 3,
+		GameProtocolVersion:   uint32(c.cfg.GameVer),
+		ClientVersion:         c.cfg.ClientVersion,
+		Capabilities:          c.cfg.Capabilities,
+		MinRefundBlocks:       c.cfg.MinRefundBlocks,
+		BondLockBlocks:        c.cfg.BondLockBlocks,
 	})
 	if err != nil {
 		return nil, hostErr("introduce this game", err)
+	}
+	if reply.GetBridgeContractVersion() != 3 {
+		return nil, fmt.Errorf("bridge financial contract version 3 required")
 	}
 	if got := reply.GetNetwork(); got != "" && got != network {
 		return nil, fmt.Errorf(

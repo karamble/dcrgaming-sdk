@@ -7,8 +7,9 @@ import (
 	"time"
 
 	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/txscript/v4/stdaddr"
-	"github.com/decred/dcrd/wire"
+	"github.com/karamble/dcrgaming-sdk/pkg/gaming/gamingpb"
 
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/transport"
 )
@@ -94,7 +95,7 @@ func TestAHeldSpendStaysPendingUntilAnswered(t *testing.T) {
 	ctx := context.Background()
 	b.SetVerdict(Hold, "")
 
-	sp, err := conn.RequestSpend(ctx, payTo(t), 5_000_000, "a stake")
+	sp, err := requestBond(t, conn)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
@@ -128,7 +129,7 @@ func TestARefusedSpendIsTerminalAndKeepsItsReason(t *testing.T) {
 	_, conn := serve(t, b)
 	b.SetVerdict(Refuse, "over the cap")
 
-	sp, err := conn.RequestSpend(context.Background(), payTo(t), 5_000_000, "a stake")
+	sp, err := requestBond(t, conn)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
@@ -150,7 +151,7 @@ func TestAnApprovedSpendBecomesAFindableOutput(t *testing.T) {
 	_, conn := serve(t, b)
 	ctx := context.Background()
 
-	sp, err := conn.RequestSpend(ctx, payTo(t), 5_000_000, "a stake")
+	sp, err := requestBond(t, conn)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
@@ -223,32 +224,25 @@ func TestAFrameReachesTheOtherSeatAndNotItself(t *testing.T) {
 	}
 }
 
-// Broadcast is taken at its word, and every output it carries has to land, or a
-// settlement cannot be followed to its outputs.
-func TestBroadcastPutsEveryOutputOnTheChain(t *testing.T) {
-	b := New(Options{Params: params(), Height: 100})
-	_, conn := serve(t, b)
-	ctx := context.Background()
+// The wire contract must offer no arbitrary game transaction broadcast.
+func TestGameHasNoBroadcastRPC(t *testing.T) {
+	service := gamingpb.File_gaming_bridge_proto.Services().ByName("BridgeService")
+	if service.Methods().ByName("Broadcast") != nil {
+		t.Fatal("game can broadcast arbitrary transactions")
+	}
+}
 
-	addr, err := stdaddr.DecodeAddress(payTo(t), params())
+func requestBond(t *testing.T, conn *transport.Bridge) (transport.Spend, error) {
+	t.Helper()
+	key := secp256k1.PrivKeyFromBytes([]byte{42})
+	dep, err := conn.PrepareDeposit(context.Background(), &gamingpb.PrepareDepositRequest{
+		Sid: "table", Kind: "seatbond", AmountAtoms: 5_000_000, LockBlocks: 8,
+		IdentityKey: hex.EncodeToString(key.PubKey().SerializeCompressed()),
+	})
 	if err != nil {
-		t.Fatalf("decode: %v", err)
+		return transport.Spend{}, err
 	}
-	_, pkScript := addr.PaymentScript()
-	raw := twoOutputTx(t, pkScript)
-
-	txid, err := conn.Broadcast(ctx, raw)
-	if err != nil {
-		t.Fatalf("broadcast: %v", err)
-	}
-	if got := b.SentCount(txid); got != 1 {
-		t.Fatalf("sent count is %d, want 1", got)
-	}
-	for vout := range uint32(2) {
-		if _, ok := b.Output(txid, vout); !ok {
-			t.Fatalf("output %d did not land", vout)
-		}
-	}
+	return conn.RequestDepositSpend(context.Background(), dep.Id, dep.Address, 5_000_000, "admission bond")
 }
 
 func TestServeRefusesABridgeWithNoSeats(t *testing.T) {
@@ -274,19 +268,4 @@ func TestTheBlockClockIsDeterministicAndPerHeight(t *testing.T) {
 	if BlockHashHex(7) == BlockHashHex(8) {
 		t.Fatal("two heights share a hash")
 	}
-}
-
-// twoOutputTx is a transaction with two outputs and no real inputs. The fake
-// takes a broadcast at its word, so it needs to be well formed, not spendable.
-func twoOutputTx(t *testing.T, pkScript []byte) string {
-	t.Helper()
-	tx := wire.NewMsgTx()
-	tx.AddTxIn(wire.NewTxIn(&wire.OutPoint{Index: 0}, 0, nil))
-	tx.AddTxOut(wire.NewTxOut(1_000, pkScript))
-	tx.AddTxOut(wire.NewTxOut(2_000, pkScript))
-	raw, err := tx.Bytes()
-	if err != nil {
-		t.Fatalf("serialize: %v", err)
-	}
-	return hex.EncodeToString(raw)
 }

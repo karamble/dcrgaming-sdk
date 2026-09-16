@@ -2,6 +2,7 @@ package transport
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/gamingpb"
@@ -28,6 +29,14 @@ const (
 // for the life of the program. Losing the connection is not the end of the
 // stream; it is a pause in it.
 func (c *Bridge) Events(ctx context.Context) (<-chan InboundFrame, error) {
+	c.mu.Lock()
+	if c.streamStarted {
+		c.mu.Unlock()
+		return nil, fmt.Errorf("bridge subscription already started")
+	}
+	c.streamStarted = true
+	c.mu.Unlock()
+	c.setStatus(Connecting)
 	go c.streamForever(ctx)
 	return c.frames, nil
 }
@@ -40,6 +49,7 @@ func (c *Bridge) Requests() <-chan *gamingpb.BridgeRequest { return c.requests }
 
 func (c *Bridge) streamForever(ctx context.Context) {
 	defer close(c.frames)
+	defer c.setStatus(Stopped)
 
 	wait := streamRetryMin
 	for {
@@ -47,6 +57,7 @@ func (c *Bridge) streamForever(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		c.setStatus(Reconnecting)
 		if err != nil {
 			c.warnf("the bridge's stream ended (%v); trying again in %s", err, wait)
 		}
@@ -102,6 +113,7 @@ func (c *Bridge) streamOnce(ctx context.Context) error {
 
 // handleStart records where the stream begins, and says so if frames were lost.
 func (c *Bridge) handleStart(start *gamingpb.StreamStart) {
+	c.setStatus(Subscribed)
 	c.mu.Lock()
 	c.epoch, c.lastSeq = start.GetEpoch(), start.GetFromSeq()
 	c.mu.Unlock()

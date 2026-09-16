@@ -2,11 +2,13 @@ package runtime
 
 import (
 	"context"
+	"encoding/hex"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/bridgetest"
+	"github.com/karamble/dcrgaming-sdk/pkg/gaming/gamingpb"
 	"github.com/karamble/dcrgaming-sdk/pkg/spend"
 )
 
@@ -17,10 +19,31 @@ func quickPoll(t *testing.T) {
 	t.Cleanup(func() { fundPoll = old })
 }
 
-// The order that matters: the request is written down before the bridge is
-// asked, so a crash between the two leaves a record to ask about rather than a
-// payment nobody is watching.
-func TestARequestIsWrittenDownBeforeTheBridgeIsAsked(t *testing.T) {
+func requestVerifiedTestDeposit(t *testing.T, rt *Runtime) (spend.Record, string) {
+	t.Helper()
+	key, err := rt.identity.DeriveKey(rt.seatTags.Bond, "fund-test")
+	if err != nil {
+		t.Fatalf("derive identity key: %v", err)
+	}
+	dep, err := rt.bridge.PrepareDeposit(context.Background(), &gamingpb.PrepareDepositRequest{
+		Sid: "fund-test", Kind: "seatbond", AmountAtoms: 5_000_000, LockBlocks: 8,
+		IdentityKey: hex.EncodeToString(key.PubKey().SerializeCompressed()),
+	})
+	if err != nil {
+		t.Fatalf("prepare deposit: %v", err)
+	}
+	sp, err := rt.bridge.RequestDepositSpend(context.Background(), dep.GetId(), dep.GetAddress(), 5_000_000, "admission bond")
+	if err != nil {
+		t.Fatalf("request deposit: %v", err)
+	}
+	return spend.Record{ID: sp.ID, Match: "fund-test", Purpose: "seatbond",
+		Address: dep.GetAddress(), Atoms: 5_000_000, PkScript: dep.GetPkScript(), DepositID: dep.GetId()}, sp.ID
+}
+
+// A game cannot create a payment request without a bridge-prepared deposit.
+// Failure before that descriptor exists leaves no local record claiming money
+// may have moved and no spend at the bridge.
+func TestARequestWithoutABridgeDepositCannotMoveMoney(t *testing.T) {
 	fake, rt, _ := stand(t, &trivialGame{})
 	quickPoll(t)
 	// The bridge cannot be reached at all, so nothing can come back.
@@ -36,11 +59,11 @@ func TestARequestIsWrittenDownBeforeTheBridgeIsAsked(t *testing.T) {
 		t.Fatal("asking an unreachable bridge succeeded")
 	}
 	open := rt.book.OpenRecords()
-	if len(open) != 1 {
-		t.Fatalf("the request was not written down: %+v", open)
+	if len(open) != 0 {
+		t.Fatalf("an unverified request was recorded as money in flight: %+v", open)
 	}
-	if open[0].Purpose != "stake" || open[0].State != spend.Requested {
-		t.Fatalf("the record is %+v", open[0])
+	if len(fake.Spends()) != 0 {
+		t.Fatal("the unverified request reached payment approval")
 	}
 }
 
@@ -91,14 +114,8 @@ func TestTheWaitFinishesWhenTheBridgeComesBack(t *testing.T) {
 	fake, rt, _ := stand(t, &trivialGame{})
 	quickPoll(t)
 
-	sp, err := rt.bridge.RequestSpend(context.Background(), payTo(t), 5_000_000, "stake")
-	if err != nil {
-		t.Fatalf("request: %v", err)
-	}
-	if err := rt.book.Put(spend.Record{
-		ID: sp.ID, Match: "abcdef01", Purpose: "stake",
-		Address: payTo(t), Atoms: 5_000_000, PkScript: "76a914",
-	}); err != nil {
+	rec, id := requestVerifiedTestDeposit(t, rt)
+	if err := rt.book.Put(rec); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	fake.SetUnreachable(true)
@@ -109,7 +126,7 @@ func TestTheWaitFinishesWhenTheBridgeComesBack(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	got, err := rt.awaitAnswer(ctx, sp.ID)
+	got, err := rt.awaitAnswer(ctx, id)
 	if err != nil {
 		t.Fatalf("the wait did not finish after the bridge came back: %v", err)
 	}
@@ -127,22 +144,16 @@ func TestWaitingEndsWhenTheBridgeRefuses(t *testing.T) {
 	quickPoll(t)
 	fake.SetVerdict(bridgetest.Refuse, "over the cap")
 
-	sp, err := rt.bridge.RequestSpend(context.Background(), payTo(t), 5_000_000, "stake")
-	if err != nil {
-		t.Fatalf("request: %v", err)
-	}
-	if err := rt.book.Put(spend.Record{
-		ID: sp.ID, Match: "abcdef01", Purpose: "stake",
-		Address: payTo(t), Atoms: 5_000_000, PkScript: "76a914",
-	}); err != nil {
+	rec, id := requestVerifiedTestDeposit(t, rt)
+	if err := rt.book.Put(rec); err != nil {
 		t.Fatalf("put: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := rt.awaitAnswer(ctx, sp.ID); err == nil {
+	if _, err := rt.awaitAnswer(ctx, id); err == nil {
 		t.Fatal("a refusal did not end the wait")
 	}
-	got, _ := rt.book.Get(sp.ID)
+	got, _ := rt.book.Get(id)
 	if got.State != spend.Denied {
 		t.Fatalf("state is %q", got.State)
 	}
@@ -218,32 +229,5 @@ func TestFundingRefusesATableThisGameIsNotAt(t *testing.T) {
 	_, rt, _ := stand(t, &trivialGame{})
 	if err := rt.Fund(context.Background(), "no-such-table"); err == nil {
 		t.Fatal("funded a table this game is not at")
-	}
-}
-
-// A payout script has to be recorded against a real table, and it is copied
-// rather than aliased so a caller cannot change it afterwards.
-func TestAPayoutIsRecordedAgainstItsTableAndCopied(t *testing.T) {
-	_, rt, _ := stand(t, &trivialGame{})
-	sid, err := accept(rt, invite(t, nil), testGCID)
-	if err != nil {
-		t.Fatalf("accept: %v", err)
-	}
-	if err := rt.SetPayoutFor("no-such-table", 0, []byte{1}); err == nil {
-		t.Error("recorded a payout for a table this game is not at")
-	}
-	if err := rt.SetPayoutFor(sid, 0, nil); err == nil {
-		t.Error("recorded a payout of nothing")
-	}
-	mine := []byte{0x76, 0xa9}
-	if err := rt.SetPayoutFor(sid, 0, mine); err != nil {
-		t.Fatalf("set payout: %v", err)
-	}
-	mine[0] = 0xff
-	rt.mu.Lock()
-	got := rt.tables[sid].payouts[0]
-	rt.mu.Unlock()
-	if got[0] != 0x76 {
-		t.Fatal("the stored payout changed when the caller's slice did")
 	}
 }

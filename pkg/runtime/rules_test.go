@@ -21,10 +21,9 @@ func (p *pokerRules) Identity() connect.Identity {
 		GameID: "poker", GameVer: 5, ClientVersion: "dcrpoker",
 		Capabilities: []gamingpb.Capability{
 			gamingpb.Capability_CAP_ACCEPT_INVITE,
-			gamingpb.Capability_CAP_RECLAIM,
-			gamingpb.Capability_CAP_SET_PAYOUT,
 			gamingpb.Capability_CAP_SET_NAMES,
 		},
+		MinRefundBlocks: 288, BondLockBlocks: 4032,
 	}
 }
 
@@ -32,6 +31,7 @@ func (p *pokerRules) Terms(sid string) (membership.Terms, error) {
 	return membership.Terms{
 		Game: "poker", GameVer: 5, SID: sid,
 		BuyInAtoms: 5_000_000, Seats: 2, CSVBlocks: 288, Until: 900,
+		BondAtoms: escrow.MinBondAtoms, BondLockBlocks: 4032,
 	}, nil
 }
 
@@ -57,8 +57,6 @@ func (b *battleshipsRules) Identity() connect.Identity {
 		GameID: "battleships", GameVer: 1, ClientVersion: "dcrbattleshipsd",
 		Capabilities: []gamingpb.Capability{
 			gamingpb.Capability_CAP_ACCEPT_INVITE,
-			gamingpb.Capability_CAP_RECLAIM,
-			gamingpb.Capability_CAP_SET_PAYOUT,
 			gamingpb.Capability_CAP_SET_NAMES,
 		},
 		MinRefundBlocks: 2048, BondLockBlocks: 4032,
@@ -108,7 +106,7 @@ func TestBothGamesStateTheirTermsThroughOneMethod(t *testing.T) {
 		rules Rules
 		bond  bool
 	}{
-		{"poker", &pokerRules{}, false},
+		{"poker", &pokerRules{}, true},
 		{"battleships", &battleshipsRules{}, true},
 	} {
 		tm, err := tc.rules.Terms("sid-abc")

@@ -80,13 +80,6 @@ func (c *Bridge) outpoint(ctx context.Context, txid string, vout uint32, mempool
 // The bridge bounds it by shape rather than by intent: it refuses anything
 // taking coin that is not this game's, and anything moving coin the game could
 // move on its own to somewhere it did not come from.
-func (c *Bridge) Broadcast(ctx context.Context, rawTxHex string) (string, error) {
-	reply, err := c.rpc.Broadcast(ctx, &gamingpb.BroadcastRequest{RawTxHex: rawTxHex})
-	if err != nil {
-		return "", hostErr("relay a transaction", err)
-	}
-	return reply.GetTxid(), nil
-}
 
 // RequestSpend asks a person to pay an address, and returns as soon as the
 // request is recorded - not when it is paid.
@@ -94,15 +87,6 @@ func (c *Bridge) Broadcast(ctx context.Context, rawTxHex string) (string, error)
 // The reason travels because a person is going to read it. "Fund a bond" and
 // "buy into a table" are the same amount to a cap and entirely different things
 // to somebody deciding.
-func (c *Bridge) RequestSpend(ctx context.Context, address string, amountAtoms int64, reason string) (Spend, error) {
-	reply, err := c.rpc.RequestSpend(ctx, &gamingpb.RequestSpendRequest{
-		Address: address, AmountAtoms: amountAtoms, Reason: reason,
-	})
-	if err != nil {
-		return Spend{}, hostErr("ask for a payment", err)
-	}
-	return spendFrom(reply), nil
-}
 
 // SpendStatus reports what became of one of this game's requests.
 func (c *Bridge) SpendStatus(ctx context.Context, id string) (Spend, error) {

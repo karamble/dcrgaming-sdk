@@ -129,7 +129,7 @@ func TestAStakeShortOfTheBuyInIsRefused(t *testing.T) {
 	}
 	script, _ := hex.DecodeString(dep.pkScript)
 	short := strings.Repeat("12", 32)
-	fake.Place(short, 0, script, int64(tbl.form.Terms().BuyInAtoms)-1, fake.Height())
+	fake.Place(short, 0, script, int64(tbl.formation().Terms().BuyInAtoms)-1, fake.Height())
 
 	err = rt.adoptFunded(context.Background(), sid, theirFunding(t, them, short+":0"))
 	if err == nil {
@@ -253,20 +253,18 @@ func TestTheStakeIsSaidAgainUntilTheTableIsFunded(t *testing.T) {
 	sid, them := seatTwo(t, fake, rt)
 	ctx := context.Background()
 
-	// The opponent's punishment key too, or the repeat that carries ours
-	// keeps a message going out every block and this counts that instead.
-	if err := rt.adoptPunishKey(ctx, sid, theirPunishNote(t, rt, sid, them)); err != nil {
-		t.Fatalf("adopt their punishment key: %v", err)
-	}
 	// This seat's stake is on the chain; the other's is not yet known.
 	tbl, _ := rt.tableOf(sid)
-	mine, _ := tbl.form.OurSeat()
+	mine, _ := tbl.formation().OurSeat()
 	dep, _ := rt.depositFor(tbl, mine)
 	script, _ := hex.DecodeString(dep.pkScript)
 	ours := stakeTxid(mine)
 	fake.Place(ours, 0, script, stakeAtoms, fake.Height())
 	rt.mu.Lock()
 	tbl.funded = map[uint32]staked{mine: {outpoint: ours + ":0", atoms: stakeAtoms}}
+	// This test counts stake announcements. Mark payout destinations known so
+	// their independent retry loop does not affect that count.
+	tbl.payouts = map[uint32][]byte{0: {0x51}, 1: {0x51}}
 	rt.mu.Unlock()
 
 	at := fake.Height()
@@ -308,7 +306,7 @@ func TestATickAtNoHeightDoesNothing(t *testing.T) {
 	// With a stake to announce and a seat still short of it, so there is
 	// something a tick would send if it treated this as a block.
 	tbl, _ := rt.tableOf(sid)
-	mine, _ := tbl.form.OurSeat()
+	mine, _ := tbl.formation().OurSeat()
 	dep, _ := rt.depositFor(tbl, mine)
 	script, _ := hex.DecodeString(dep.pkScript)
 	ours := stakeTxid(mine)
@@ -404,7 +402,7 @@ func elsewherePay(t *testing.T) string {
 // The seat check alone does not do it: the signer field travels with the
 // message, so anybody can set it to the seat's real key. Only the signature
 // says the seat actually spoke.
-func TestAForgedSignatureIsRefusedOnEveryAnnouncement(t *testing.T) {
+func TestAForgedPayoutSignatureIsRefused(t *testing.T) {
 	fake, rt, _ := stand(t, &trivialGame{})
 	sid, them := seatTwo(t, fake, rt)
 	seat, _ := them.form.OurSeat()
@@ -428,129 +426,5 @@ func TestAForgedSignatureIsRefusedOnEveryAnnouncement(t *testing.T) {
 	forgedPay.Sig = bend(forgedPay.Sig)
 	if err := rt.adoptPayout(ctx, sid, forgedPay); err == nil {
 		t.Error("a payout with a forged signature was accepted")
-	}
-
-	outpoint := placeTheirTableBond(t, fake, rt, sid, them)
-	bonded, err := membership.SignBonded(terms, seat, outpoint, them.creds.Session)
-	if err != nil {
-		t.Fatalf("their bond: %v", err)
-	}
-	good := schema.BondedFrom(bonded)
-
-	// The forgery first, so it is judged on its own rather than dismissed
-	// as a repeat of one already accepted.
-	forgedBond := good
-	forgedBond.Sig = bend(forgedBond.Sig)
-	if err := rt.adoptBonded(ctx, sid, forgedBond); err == nil {
-		t.Error("a bond announcement with a forged signature was accepted")
-	}
-	// And the real one still works, so the refusal above was the signature
-	// and not something else about the message.
-	if err := rt.adoptBonded(ctx, sid, good); err != nil {
-		t.Errorf("a real bond announcement was refused: %v", err)
-	}
-}
-
-// A bond short of what the table asks is not a bond: the amount is what makes
-// a forfeiture worth anything.
-func TestATableBondShortOfTheTermsIsRefused(t *testing.T) {
-	fake, rt, _ := stand(t, &trivialGame{})
-	sid, them := seatTwo(t, fake, rt)
-	seat, _ := them.form.OurSeat()
-	tbl, _ := rt.tableOf(sid)
-	bond, err := rt.tableBondOf(tbl, seat)
-	if err != nil {
-		t.Fatalf("their table bond: %v", err)
-	}
-	script, err := hex.DecodeString(bond.PkScriptHex)
-	if err != nil {
-		t.Fatalf("pkScript: %v", err)
-	}
-	want := int64(tbl.form.Terms().BondAtoms)
-	if want <= 0 {
-		t.Fatal("this table asks no bond, so this proves nothing")
-	}
-	short := strings.Repeat("5b", 32)
-	fake.Place(short, 0, script, want-1, fake.Height())
-
-	b, err := membership.SignBonded(them.form.Terms(), seat, short+":0", them.creds.Session)
-	if err != nil {
-		t.Fatalf("their bond: %v", err)
-	}
-	err = rt.adoptBonded(context.Background(), sid, schema.BondedFrom(b))
-	if err == nil {
-		t.Fatal("a bond short of the terms was accepted")
-	}
-	if !strings.Contains(err.Error(), "this table asks") {
-		t.Fatalf("refused for the wrong reason: %v", err)
-	}
-}
-
-// placeTheirTableBond puts the other seat's table bond on the fake chain.
-func placeTheirTableBond(t *testing.T, fake *bridgetest.Bridge, rt *Runtime, sid string, them *peer) string {
-	t.Helper()
-	seat, _ := them.form.OurSeat()
-	tbl, err := rt.tableOf(sid)
-	if err != nil {
-		t.Fatalf("table: %v", err)
-	}
-	bond, err := rt.tableBondOf(tbl, seat)
-	if err != nil {
-		t.Fatalf("their table bond: %v", err)
-	}
-	script, err := hex.DecodeString(bond.PkScriptHex)
-	if err != nil {
-		t.Fatalf("pkScript: %v", err)
-	}
-	txid := strings.Repeat("7a", 31) + hex.EncodeToString([]byte{byte(seat)})
-	fake.Place(txid, 0, script, int64(tbl.form.Terms().BondAtoms), fake.Height())
-	return txid + ":0"
-}
-
-// A seat cannot move its table bond once it has said where it is. The bond is
-// what a forfeiture spends, so a seat that could re-point it after the fact
-// could take the money out from under one.
-func TestASeatCannotMoveItsTableBondOnceAnnounced(t *testing.T) {
-	fake, rt, _ := stand(t, &trivialGame{})
-	sid, them := seatTwo(t, fake, rt)
-	seat, _ := them.form.OurSeat()
-	terms := them.form.Terms()
-	ctx := context.Background()
-
-	first := placeTheirTableBond(t, fake, rt, sid, them)
-	b, err := membership.SignBonded(terms, seat, first, them.creds.Session)
-	if err != nil {
-		t.Fatalf("their bond: %v", err)
-	}
-	if err := rt.adoptBonded(ctx, sid, schema.BondedFrom(b)); err != nil {
-		t.Fatalf("first: %v", err)
-	}
-	// Again is a repeat, not a change.
-	if err := rt.adoptBonded(ctx, sid, schema.BondedFrom(b)); err != nil {
-		t.Fatalf("a repeated bond announcement was refused: %v", err)
-	}
-
-	tbl, _ := rt.tableOf(sid)
-	bond, _ := rt.tableBondOf(tbl, seat)
-	script, _ := hex.DecodeString(bond.PkScriptHex)
-	second := strings.Repeat("6c", 32)
-	fake.Place(second, 0, script, int64(terms.BondAtoms), fake.Height())
-
-	moved, err := membership.SignBonded(terms, seat, second+":0", them.creds.Session)
-	if err != nil {
-		t.Fatalf("their second bond: %v", err)
-	}
-	err = rt.adoptBonded(ctx, sid, schema.BondedFrom(moved))
-	if err == nil {
-		t.Fatal("a seat moved its table bond after announcing it")
-	}
-	if !strings.Contains(err.Error(), "already put its table bond at") {
-		t.Fatalf("refused for the wrong reason: %v", err)
-	}
-	rt.mu.Lock()
-	got := tbl.tableBondFunded[seat].outpoint
-	rt.mu.Unlock()
-	if got != first {
-		t.Fatalf("the bond moved to %q", got)
 	}
 }

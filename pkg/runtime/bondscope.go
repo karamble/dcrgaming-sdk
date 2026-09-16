@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -12,49 +13,10 @@ import (
 	"github.com/karamble/dcrgaming-sdk/pkg/spend"
 )
 
-// What a seat stakes to be allowed to join at all, and how many of them.
-//
-// A join binds to a bond, which is what stops a stranger filling a table's
-// seats for nothing. How many bonds a player needs is not a fact about the
-// protocol - it is an economic choice, and the two existing games made
-// different ones. Neither is wrong, so the SDK states the choice rather than
-// picking one and calling the other a special case.
-
-// BondScope says how many seat bonds a player posts.
-type BondScope int
-
-const (
-	// BondPerIdentity is one bond backing every table this player sits at.
-	// Cheap for somebody playing several at once, and the sybil cost is
-	// paid once per identity. dcrpoker has always worked this way.
-	BondPerIdentity BondScope = iota
-
-	// BondPerTable is a fresh bond for each table. Dearer - a player at
-	// three tables locks three bonds - and stronger for it: one bond cannot
-	// stand behind two seats, so a player cannot be at more tables than
-	// they have staked for. dcrbattleships works this way.
-	BondPerTable
-)
-
-func (s BondScope) String() string {
-	if s == BondPerTable {
-		return "one bond per table"
-	}
-	return "one bond per identity"
-}
-
-// seatBondKeyFor derives the key that opens this seat's bond.
-//
-// Per identity the session id is left out, and that is not an oversight:
-// [identity.Identity.BondDeposit] is one outpoint per identity, so the key
-// that opens it has to be one key too. Per table it is included, because each
-// table's bond is its own coin behind its own script.
+// seatBondKeyFor derives a table-scoped identity key for membership proofs.
+// It cannot spend the bond; the bridge owns the separate recovery key.
 func (r *Runtime) seatBondKeyFor(sid string) (*secp256k1.PrivateKey, error) {
-	scope := ""
-	if r.bondScope == BondPerTable {
-		scope = sid
-	}
-	key, err := r.identity.DeriveKey(r.seatTags.Bond, scope)
+	key, err := r.identity.DeriveKey(r.seatTags.Bond, sid)
 	if err != nil {
 		return nil, fmt.Errorf("derive this seat's bond key: %w", err)
 	}
@@ -62,38 +24,34 @@ func (r *Runtime) seatBondKeyFor(sid string) (*secp256k1.PrivateKey, error) {
 }
 
 // seatBondLock is how long a seat bond sits behind its timelock.
-func seatBondLock(terms membership.Terms) uint32 {
-	if terms.BondLockBlocks > 0 {
-		return terms.BondLockBlocks
-	}
-	// A table that states no bond terms uses the escrow floor, which is
-	// what dcrpoker has always done.
-	return escrow.MinBondBlocks
-}
-
 // seatBondScript is the script this seat's bond sits behind.
 func (r *Runtime) seatBondScript(terms membership.Terms) ([]byte, error) {
+	r.mu.Lock()
+	pub := ""
+	if t := r.tables[terms.SID]; t != nil {
+		pub = t.bridgeKey
+	}
+	r.mu.Unlock()
+	return r.bondScriptFor(terms, pub)
+}
+func (r *Runtime) bondScriptFor(terms membership.Terms, pub string) ([]byte, error) {
 	key, err := r.seatBondKeyFor(terms.SID)
 	if err != nil {
 		return nil, err
 	}
-	script, err := escrow.BondScript(key.PubKey().SerializeCompressed(), seatBondLock(terms))
-	if err != nil {
-		return nil, fmt.Errorf("build this seat's bond script: %w", err)
+	if pub == "" {
+		return nil, fmt.Errorf("bridge-controlled spending key is required")
 	}
-	return script, nil
+	recovery, err := hex.DecodeString(pub)
+	if err != nil {
+		return nil, err
+	}
+	return escrow.BridgeBondScript(key.PubKey().SerializeCompressed(), recovery, terms.BondLockBlocks)
 }
 
-// FundSeatBond pays the bond this seat's join will bind to.
-//
-// Only for a game that posts one per table; per identity there is a single
-// deposit and funding it is not a table's business. Paid before the table
-// forms, because the join names the bond and a join naming a bond nobody paid
-// is a seat that cost nothing.
+// FundSeatBond requests the table's explicitly agreed admission deposit.
+// Only the bridge can approve, sign, and publish its funding transaction.
 func (r *Runtime) FundSeatBond(ctx context.Context, match string) error {
-	if r.bondScope != BondPerTable {
-		return fmt.Errorf("this game posts %s, so a table does not fund one", r.bondScope)
-	}
 	t, err := r.rawTable(match)
 	if err != nil {
 		return err
@@ -106,6 +64,26 @@ func (r *Runtime) FundSeatBond(ctx context.Context, match string) error {
 	}
 
 	terms := t.terms
+	tip, err := r.bridge.ChainTip(ctx)
+	if err != nil {
+		return err
+	}
+	existing := false
+	for _, rec := range r.book.All() {
+		if rec.Match == match && rec.Purpose == "seatbond" {
+			existing = true
+		}
+	}
+	if tip.Height > int64(terms.Until) && !existing {
+		r.mu.Lock()
+		t.recoveryOnly = true
+		t.recoveryReason = "admission expired"
+		r.mu.Unlock()
+		if err := r.keep(t); err != nil {
+			return err
+		}
+		return fmt.Errorf("admission deadline passed")
+	}
 	script, err := r.seatBondScript(terms)
 	if err != nil {
 		return err
@@ -116,7 +94,7 @@ func (r *Runtime) FundSeatBond(ctx context.Context, match string) error {
 	}
 	atoms := int64(terms.BondAtoms)
 	if atoms <= 0 {
-		atoms = int64(escrow.MinBondAtoms)
+		return fmt.Errorf("explicit admission bond amount is required")
 	}
 	rec, err := r.askFor(ctx, spend.Record{
 		Match: match, Purpose: "seatbond",
@@ -132,28 +110,16 @@ func (r *Runtime) FundSeatBond(ctx context.Context, match string) error {
 	r.mu.Lock()
 	t.seatBond = out
 	r.mu.Unlock()
-	r.keep(t)
-	return nil
+	return r.keep(t)
 }
 
-// seatBondOutpoint is where this seat's bond is, whichever way the game counts
-// them.
+// seatBondOutpoint is the admission deposit funded for this table.
 func (r *Runtime) seatBondOutpoint(t *table) (string, error) {
-	if r.bondScope == BondPerTable {
-		r.mu.Lock()
-		out := t.seatBond.outpoint
-		r.mu.Unlock()
-		if strings.TrimSpace(out) == "" {
-			return "", fmt.Errorf(
-				"this table's seat bond is not on the chain yet, so there is nothing to join with")
-		}
-		return out, nil
-	}
-	out := r.identity.BondDeposit()
+	r.mu.Lock()
+	out := t.seatBond.outpoint
+	r.mu.Unlock()
 	if strings.TrimSpace(out) == "" {
-		return "", fmt.Errorf(
-			"this seat has no bond deposit yet, so it has nothing to stake against its word; " +
-				"fund one before joining a table")
+		return "", fmt.Errorf("this table's seat bond is not on the chain yet")
 	}
 	return out, nil
 }

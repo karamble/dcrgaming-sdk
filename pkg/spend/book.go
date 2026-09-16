@@ -16,9 +16,13 @@ import (
 // what a script says, and a record that could name either would be a record
 // that could redirect a payment.
 type Record struct {
+	DepositID string `json:",omitempty"` // immutable descriptor retained by the bridge
 	// ID is the bridge's id for the request. Empty until the bridge answers
 	// the first ask, because the id is the bridge's to issue.
 	ID string
+	// Obligation binds a request to immutable game terms and derived identity.
+	Obligation string `json:",omitempty"`
+	Attempt    uint32 `json:",omitempty"`
 
 	// Match and Seat say which table and seat the money is for. Both games
 	// needed both; one keyed by session id and seat, the other by match, and
@@ -75,6 +79,7 @@ type Book struct {
 	records map[string]Record
 	pending []Record // requested before the bridge issued an id
 	watch   []func(Record)
+	fault   error
 }
 
 // OpenBook reads a book back, or starts an empty one.
@@ -91,6 +96,9 @@ func OpenBook(store Store) (*Book, error) {
 		if r.ID == "" {
 			b.pending = append(b.pending, r)
 			continue
+		}
+		if _, exists := b.records[r.ID]; exists {
+			return nil, fmt.Errorf("duplicate payment request id %q", r.ID)
 		}
 		b.records[r.ID] = r
 	}
@@ -216,14 +224,31 @@ func (b *Book) Adopt(match, purpose, id string) (Record, error) {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for i, p := range b.pending {
-		if p.Match != match || p.Purpose != purpose {
-			continue
-		}
-		p.ID = id
-		b.pending = append(b.pending[:i], b.pending[i+1:]...)
-		return p, b.commitLocked(p)
+	if _, exists := b.records[id]; exists {
+		return Record{}, fmt.Errorf("request id already belongs to an obligation")
 	}
+	found := -1
+	for i, p := range b.pending {
+		if p.Match == match && p.Purpose == purpose {
+			if found >= 0 {
+				return Record{}, fmt.Errorf("ambiguous requests require reconciliation")
+			}
+			found = i
+		}
+	}
+	if found >= 0 {
+		p := b.pending[found]
+		p.ID = id
+		pending := append([]Record(nil), b.pending[:found]...)
+		pending = append(pending, b.pending[found+1:]...)
+		records := make(map[string]Record, len(b.records)+1)
+		for key, old := range b.records {
+			records[key] = old
+		}
+		records[id] = p
+		return p, b.saveLocked(records, pending, p)
+	}
+
 	return Record{}, fmt.Errorf("no unidentified %s request is recorded for %q", purpose, match)
 }
 
@@ -272,16 +297,35 @@ func (b *Book) allLocked() []Record {
 // lock. The disk write happens before any watcher runs, so a game mirroring the
 // book can never be ahead of it.
 func (b *Book) commitLocked(r Record) error {
+	records := make(map[string]Record, len(b.records)+1)
+	for id, old := range b.records {
+		records[id] = old
+	}
+	pending := append([]Record(nil), b.pending...)
 	if r.ID == "" {
-		b.pending = append(b.pending, r)
+		pending = append(pending, r)
 	} else {
-		b.records[r.ID] = r
+		records[r.ID] = r
 	}
-	if err := b.store.Save(b.allLocked()); err != nil {
-		return fmt.Errorf("write the spend book: %w", err)
+	return b.saveLocked(records, pending, r)
+}
+
+func (b *Book) saveLocked(records map[string]Record, pending []Record, changed Record) error {
+	if b.fault != nil {
+		return b.fault
 	}
+	all := append([]Record(nil), pending...)
+	for _, r := range records {
+		all = append(all, r)
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].ID < all[j].ID })
+	if err := b.store.Save(all); err != nil {
+		b.fault = fmt.Errorf("write the spend book: %w", err)
+		return b.fault
+	}
+	b.records, b.pending = records, pending
 	for _, f := range b.watch {
-		f(r)
+		f(changed)
 	}
 	return nil
 }
@@ -303,3 +347,6 @@ func fromTransport(s transport.SpendState) (State, bool) {
 	}
 	return "", false
 }
+
+// Err reports a latched persistence fault. Reopen from disk after repairing storage.
+func (b *Book) Err() error { b.mu.Lock(); defer b.mu.Unlock(); return b.fault }

@@ -41,11 +41,11 @@ func (r *Runtime) announceFunded(ctx context.Context, match string) error {
 	if !have || out.outpoint == "" {
 		return fmt.Errorf("this seat's stake is not on the chain yet")
 	}
-	session, _, err := r.seatKeys(t.form.Terms().SID)
+	session, _, err := r.seatKeys(t.formation().Terms().SID)
 	if err != nil {
 		return err
 	}
-	f, err := membership.SignFunding(t.form.Terms(), mine, out.outpoint, session)
+	f, err := membership.SignFunding(t.formation().Terms(), mine, out.outpoint, session)
 	if err != nil {
 		return fmt.Errorf("sign where the stake is: %w", err)
 	}
@@ -71,7 +71,7 @@ func (r *Runtime) adoptFunded(ctx context.Context, match string, body schema.Fun
 	if err := r.seatSaidIt(t, f.Seat, f.Signer); err != nil {
 		return err
 	}
-	if err := f.Verify(t.form.Terms()); err != nil {
+	if err := f.Verify(t.formation().Terms()); err != nil {
 		return fmt.Errorf("seat %d's stake: %w", f.Seat, err)
 	}
 	dep, err := r.depositFor(t, f.Seat)
@@ -85,7 +85,7 @@ func (r *Runtime) adoptFunded(ctx context.Context, match string, body schema.Fun
 	// The amount is the table's, not the payer's to choose. A seat that
 	// staked less than the buy-in would be playing for a pot everyone else
 	// filled.
-	if want := int64(t.form.Terms().BuyInAtoms); out.atoms < want {
+	if want := int64(t.formation().Terms().BuyInAtoms); out.atoms < want {
 		return fmt.Errorf("seat %d's stake holds %d atoms, and this table costs %d",
 			f.Seat, out.atoms, want)
 	}
@@ -103,152 +103,9 @@ func (r *Runtime) adoptFunded(ctx context.Context, match string, body schema.Fun
 	}
 	t.funded[f.Seat] = out
 	r.mu.Unlock()
-	r.keep(t)
-	return nil
+	return r.keep(t)
 }
 
-// announceBonded tells the table where one of this seat's bonds landed.
-//
-// Both bonds ride this message, and the receiver tells them apart by which
-// script the output pays - which it can, because it derived both itself. One
-// kind rather than two because the difference is already on the chain, and a
-// message that had to say which would be a message that could say the wrong
-// one.
-func (r *Runtime) announceBonded(ctx context.Context, match string, which bondKind) error {
-	t, mine, err := r.ourSeatAt(match)
-	if err != nil {
-		return err
-	}
-	r.mu.Lock()
-	held := t.tableBondFunded
-	if which == forfeitableBond {
-		held = t.forfeitFunded
-	}
-	out, have := held[mine]
-	r.mu.Unlock()
-	if !have || out.outpoint == "" {
-		return fmt.Errorf("this seat's %s is not on the chain yet", which)
-	}
-	session, _, err := r.seatKeys(t.form.Terms().SID)
-	if err != nil {
-		return err
-	}
-	b, err := membership.SignBonded(t.form.Terms(), mine, out.outpoint, session)
-	if err != nil {
-		return fmt.Errorf("sign where the bond is: %w", err)
-	}
-	return r.send(ctx, t, KindBonded, schema.BondedFrom(b))
-}
-
-// adoptBonded takes another seat's word for where one of its bonds is.
-//
-// Which bond it is comes from the chain and not from the message: the output
-// has to pay one of the two scripts this table derived for that seat, and
-// whichever it pays is which bond it is. A seat cannot therefore file its
-// cheaper bond as the dearer one.
-func (r *Runtime) adoptBonded(ctx context.Context, match string, body schema.Bonded) error {
-	b, err := body.Into()
-	if err != nil {
-		return fmt.Errorf("read where a bond is: %w", err)
-	}
-	t, err := r.tableOf(match)
-	if err != nil {
-		return err
-	}
-	if err := r.seatSaidIt(t, b.Seat, b.Signer); err != nil {
-		return err
-	}
-	terms := t.form.Terms()
-	if err := b.Verify(terms); err != nil {
-		return fmt.Errorf("seat %d's bond: %w", b.Seat, err)
-	}
-
-	which, out, err := r.whichBond(ctx, t, b.Seat, b.Outpoint)
-	if err != nil {
-		return err
-	}
-	if want := bondAtomsFor(terms, which); out.atoms < want {
-		return fmt.Errorf("seat %d's %s holds %d atoms, and this table asks %d",
-			b.Seat, which, out.atoms, want)
-	}
-
-	r.mu.Lock()
-	into := &t.tableBondFunded
-	if which == forfeitableBond {
-		into = &t.forfeitFunded
-	}
-	if *into == nil {
-		*into = map[uint32]staked{}
-	}
-	held, seen := (*into)[b.Seat]
-	if seen && held.outpoint != "" && held.outpoint != b.Outpoint {
-		r.mu.Unlock()
-		return fmt.Errorf("seat %d has already put its %s at %s", b.Seat, which, held.outpoint)
-	}
-	(*into)[b.Seat] = out
-	r.mu.Unlock()
-	r.keep(t)
-	return nil
-}
-
-// bondKind is which of a seat's two bonds a message is about.
-type bondKind int
-
-const (
-	// tableBond is staked against staying reachable.
-	tableBond bondKind = iota
-	// forfeitableBond is staked against telling the truth.
-	forfeitableBond
-)
-
-func (k bondKind) String() string {
-	if k == forfeitableBond {
-		return "forfeitable bond"
-	}
-	return "table bond"
-}
-
-// bondAtomsFor is what a table asks for one of its bonds.
-func bondAtomsFor(terms membership.Terms, which bondKind) int64 {
-	if which == forfeitableBond && terms.ForfeitBondAtoms > 0 {
-		return int64(terms.ForfeitBondAtoms)
-	}
-	return int64(terms.BondAtoms)
-}
-
-// whichBond works out which of a seat's bonds an outpoint is, by which of the
-// two scripts this table derived for it the output pays.
-func (r *Runtime) whichBond(ctx context.Context, t *table, seat uint32, outpoint string) (bondKind, staked, error) {
-	var tried []string
-	if bond, err := r.tableBondOf(t, seat); err == nil {
-		out, err := r.outputPaying(ctx, outpoint, bond.PkScriptHex)
-		if err == nil {
-			return tableBond, out, nil
-		}
-		tried = append(tried, "table bond")
-	}
-	if bond, ok := r.ForfeitableBond(t.match, seat); ok {
-		out, err := r.outputPaying(ctx, outpoint, bond.PkScriptHex)
-		if err == nil {
-			return forfeitableBond, out, nil
-		}
-		tried = append(tried, "forfeitable bond")
-	}
-	if len(tried) == 0 {
-		return 0, staked{}, fmt.Errorf(
-			"this table has derived no bonds for seat %d yet, so it cannot say what %s is",
-			seat, outpoint)
-	}
-	return 0, staked{}, fmt.Errorf(
-		"%s pays neither of seat %d's bonds (%s); nothing was recorded",
-		outpoint, seat, strings.Join(tried, " or "))
-}
-
-// announcePayout tells the table where this seat wants to be paid.
-//
-// Every seat announces, because the payout scripts all go into the one
-// settlement everybody signs, and a seat whose script nobody has cannot be
-// paid by it.
 func (r *Runtime) announcePayout(ctx context.Context, match string) error {
 	t, mine, err := r.ourSeatAt(match)
 	if err != nil {
@@ -256,7 +113,7 @@ func (r *Runtime) announcePayout(ctx context.Context, match string) error {
 	}
 	// The operator's address, which is the one place this game is allowed
 	// to be paid. A game that could name its own would be naming itself.
-	addr := r.Payout()
+	addr := r.PayoutFor(match)
 	if strings.TrimSpace(addr) == "" {
 		return fmt.Errorf("no payout address has been set, so this seat cannot say where to be paid")
 	}
@@ -264,11 +121,11 @@ func (r *Runtime) announcePayout(ctx context.Context, match string) error {
 	if err != nil {
 		return err
 	}
-	session, _, err := r.seatKeys(t.form.Terms().SID)
+	session, _, err := r.seatKeys(t.formation().Terms().SID)
 	if err != nil {
 		return err
 	}
-	p, err := membership.SignPayout(t.form.Terms(), mine, addr, session)
+	p, err := membership.SignPayout(t.formation().Terms(), mine, addr, session)
 	if err != nil {
 		return fmt.Errorf("sign the payout: %w", err)
 	}
@@ -301,7 +158,7 @@ func (r *Runtime) adoptPayout(_ context.Context, match string, body schema.Payou
 	if err := r.seatSaidIt(t, p.Seat, p.Signer); err != nil {
 		return err
 	}
-	if err := p.Verify(t.form.Terms()); err != nil {
+	if err := p.Verify(t.formation().Terms()); err != nil {
 		return fmt.Errorf("seat %d's payout: %w", p.Seat, err)
 	}
 	// An address rather than a script on the wire, because an address is
@@ -324,8 +181,7 @@ func (r *Runtime) adoptPayout(_ context.Context, match string, body schema.Payou
 	}
 	t.payouts[p.Seat] = script
 	r.mu.Unlock()
-	r.keep(t)
-	return nil
+	return r.keep(t)
 }
 
 // seatSaidIt checks that the seat named is the seat that signed.
@@ -333,7 +189,7 @@ func (r *Runtime) adoptPayout(_ context.Context, match string, body schema.Payou
 // Both halves matter. Without the seat check a member could announce on
 // another seat's behalf; without the key check anybody at all could.
 func (r *Runtime) seatSaidIt(t *table, seat uint32, signer []byte) error {
-	seats, ok := t.form.Seats()
+	seats, ok := t.formation().Seats()
 	if !ok {
 		return fmt.Errorf("this table has no seating yet")
 	}
@@ -380,7 +236,14 @@ func (r *Runtime) tableOf(match string) (*table, error) {
 	if err != nil {
 		return nil, err
 	}
-	if t.form == nil {
+	r.mu.Lock()
+	pending := t.formation() == nil
+	recovery := t.recoveryOnly
+	r.mu.Unlock()
+	if recovery {
+		return nil, fmt.Errorf("table is retained for recovery only")
+	}
+	if pending {
 		return nil, fmt.Errorf("table %q has not joined yet; its seat bond is still being paid", match)
 	}
 	return t, nil
@@ -431,7 +294,15 @@ func (r *Runtime) Tick(ctx context.Context, height int64) {
 	r.mu.Unlock()
 
 	for _, t := range tables {
-		if t.form == nil {
+		r.mu.Lock()
+		pending := t.formation() == nil
+		recovery := t.recoveryOnly
+		r.mu.Unlock()
+		if recovery {
+			continue
+		}
+		if pending {
+			r.startAdmission(t)
 			// Still paying for its seat. Nothing to advance and
 			// nothing to repeat: it has said nothing yet.
 			continue
@@ -442,23 +313,22 @@ func (r *Runtime) Tick(ctx context.Context, height int64) {
 
 // tickTable moves one table on.
 func (r *Runtime) tickTable(ctx context.Context, t *table, height int64) {
-	before := t.form.State()
-	if t.form.Terms().Until > 0 && height > int64(t.form.Terms().Until) && !t.form.WindowClosed() {
+	before := t.formation().State()
+	if t.formation().Terms().Until > 0 && height > int64(t.formation().Terms().Until) && !t.formation().WindowClosed() {
 		// The admission deadline is a height every peer can check, which
 		// is why it is a height: a table that closed when each machine's
 		// clock said so would seat different memberships.
-		t.form.CloseWindow()
+		t.formation().CloseWindow()
 	}
-	if t.form.State() != before {
+	if t.formation().State() != before {
 		r.keep(t)
-		r.log.Infof("table %s: %s", t.match, t.form.State())
+		r.log.Infof("table %s: %s", t.match, t.formation().State())
 	}
 	if err := r.seatIfReady(ctx, t.match); err != nil {
 		r.log.Debugf("table %s: not seated yet: %v", t.match, err)
 	}
 	// Before anything else this block: an unanswered accusation costs the
 	// whole bond, and the window it has to be answered in is short.
-	r.answerAnyClaim(ctx, t)
 
 	r.mu.Lock()
 	said := t.saidAt
@@ -484,9 +354,9 @@ func (r *Runtime) tickTable(ctx context.Context, t *table, height int64) {
 // signature, adopting one is idempotent, and a peer taught nothing publishes
 // nothing back, so the repeat cannot echo.
 func (r *Runtime) repeatFormation(ctx context.Context, t *table) {
-	switch t.form.State() {
+	switch t.formation().State() {
 	case membership.Joining:
-		if t.form.WindowClosed() {
+		if t.formation().WindowClosed() {
 			return
 		}
 		// A join is dropped by any peer that has not accepted the
@@ -510,131 +380,31 @@ func (r *Runtime) repeatFormation(ctx context.Context, t *table) {
 // repeatAnnouncements says again what this seat has already said, while
 // anybody is still short of it.
 func (r *Runtime) repeatAnnouncements(ctx context.Context, t *table) {
-	seats, ok := t.form.Seats()
+	seats, ok := t.formation().Seats()
 	if !ok {
 		r.repeatFormation(ctx, t)
 		return
 	}
-	mine, ok := t.form.OurSeat()
+	mine, ok := t.formation().OurSeat()
 	if !ok {
 		return
 	}
 	r.mu.Lock()
-	announcedAll := len(t.punishPubs) == len(seats)
 	fundedAll := len(t.funded) == len(seats)
-	bondedAll := len(t.tableBondFunded) == len(seats)
-	forfeitAll := len(t.forfeitFunded) == len(seats)
-	paidAll := len(t.payouts) == len(seats)
 	haveStake := t.funded[mine].outpoint != ""
-	haveBond := t.tableBondFunded[mine].outpoint != ""
-	haveForfeit := t.forfeitFunded[mine].outpoint != ""
+	paidAll := len(t.payouts) == len(seats)
 	r.mu.Unlock()
-
-	// The punishment key first, because the bonds the others describe
-	// cannot even be derived until every seat has announced one - and it is
-	// announced at seating, when the other side may not be seated yet and
-	// drops it. Said once, that is a table with no forfeitable bonds, which
-	// is a table where a cheat cannot be punished.
-	if len(r.punishTag) > 0 && !announcedAll {
-		if err := r.announcePunishKey(ctx, t.match); err != nil {
-			r.log.Debugf("table %s: repeating our punishment key: %v", t.match, err)
-		}
-	}
 	if haveStake && !fundedAll {
 		if err := r.announceFunded(ctx, t.match); err != nil {
-			r.log.Debugf("table %s: repeating where the stake is: %v", t.match, err)
+			r.log.Debugf("funding announcement pending: %v", err)
 		}
 	}
-	if haveBond && !bondedAll {
-		if err := r.announceBonded(ctx, t.match, tableBond); err != nil {
-			r.log.Debugf("table %s: repeating where the table bond is: %v", t.match, err)
-		}
-	}
-	if haveForfeit && !forfeitAll {
-		if err := r.announceBonded(ctx, t.match, forfeitableBond); err != nil {
-			r.log.Debugf("table %s: repeating where the forfeitable bond is: %v", t.match, err)
-		}
-	}
-	if !paidAll && r.Payout() != "" {
+	if !paidAll && r.PayoutFor(t.match) != "" {
 		if err := r.announcePayout(ctx, t.match); err != nil {
-			r.log.Debugf("table %s: repeating the payout: %v", t.match, err)
+			r.log.Debugf("payout destination announcement pending: %v", err)
 		}
 	}
-	// Both chains, as soon as both bonds are on the chain to build them
-	// over. Not left to the game: it needs nothing the game knows, and a
-	// game that forgot has a table where silence has no remedy - which
-	// nobody discovers until somebody goes quiet.
-	if bondedAll {
-		r.mu.Lock()
-		built := len(t.ladders) > 0
-		r.mu.Unlock()
-		if !built {
-			if err := r.PresignLadder(ctx, t.match); err != nil {
-				r.log.Debugf("table %s: building the accusation chains: %v", t.match, err)
-			}
-		}
-	}
-	r.repeatLadders(ctx, t)
-
-	// The payout, while it is still short of somebody. A settlement one
-	// signature short is a table that falls back to its refund timelocks,
-	// which is weeks of everybody's money for want of one message.
 	if err := r.proposeSettlement(ctx, t); err != nil {
-		r.log.Debugf("table %s: repeating the payout: %v", t.match, err)
-	}
-}
-
-// repeatLadders says this seat's rung signatures again, while any rung is
-// still short of the other seat's.
-//
-// A chain is presigned once, and the two seats do it at whatever moment each
-// of them is ready. Whoever goes first sends into a peer that has not built
-// the chain yet and has nowhere to put the signature, so it is dropped - and
-// with nothing said again, both sides sit holding a chain neither can run.
-// That is a table where a seat can go quiet for nothing.
-func (r *Runtime) repeatLadders(ctx context.Context, t *table) {
-	r.mu.Lock()
-	type resend struct {
-		against uint32
-		tx, sig string
-	}
-	var again []resend
-	mine, seated := t.form.OurSeat()
-	seats, _ := t.form.Seats()
-	if seated {
-		mineHex := hex.EncodeToString(seats[mine])
-		for against, l := range t.ladders {
-			for i, done := range l.ready {
-				if done != nil {
-					continue
-				}
-				raw, err := l.rungs[i].Bytes()
-				if err != nil {
-					continue
-				}
-				again = append(again, resend{
-					against: against,
-					tx:      hex.EncodeToString(raw),
-					sig:     hex.EncodeToString(l.sigs[i][mineHex]),
-				})
-			}
-		}
-	}
-	r.mu.Unlock()
-
-	if len(again) == 0 {
-		return
-	}
-	mineHex := hex.EncodeToString(seats[mine])
-	for _, a := range again {
-		if a.sig == "" {
-			continue
-		}
-		if err := r.send(ctx, t, KindAccusation, schema.Accusation{
-			Seat: a.against, Tx: a.tx, Signer: mineHex, Sig: a.sig,
-		}); err != nil {
-			r.log.Debugf("table %s: repeating a rung signature: %v", t.match, err)
-			return
-		}
+		r.log.Debugf("bridge payout status unavailable: %v", err)
 	}
 }

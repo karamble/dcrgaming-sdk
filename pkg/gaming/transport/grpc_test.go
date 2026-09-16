@@ -53,7 +53,7 @@ type fakeBridge struct {
 
 func (f *fakeBridge) Hello(_ context.Context, req *gamingpb.HelloRequest) (*gamingpb.HelloReply, error) {
 	f.hello = req
-	return &gamingpb.HelloReply{Game: f.game, Network: f.network}, nil
+	return &gamingpb.HelloReply{Game: f.game, Network: f.network, BridgeContractVersion: 3}, nil
 }
 
 func (f *fakeBridge) SendFrame(_ context.Context, req *gamingpb.SendFrameRequest) (*gamingpb.SendFrameReply, error) {
@@ -369,7 +369,7 @@ func TestHelloIntroducesTheConfiguredIdentity(t *testing.T) {
 		GameID:          "battleships",
 		GameVer:         9,
 		ClientVersion:   "shipyard",
-		Capabilities:    []gamingpb.Capability{gamingpb.Capability_CAP_RECLAIM},
+		Capabilities:    []gamingpb.Capability{gamingpb.Capability_CAP_SET_NAMES},
 		MinRefundBlocks: 2048,
 		BondLockBlocks:  4096,
 	})
@@ -396,7 +396,7 @@ func TestHelloIntroducesTheConfiguredIdentity(t *testing.T) {
 		t.Errorf("hello named client %q, want the configured one", got)
 	}
 	caps := f.hello.GetCapabilities()
-	if len(caps) != 1 || caps[0] != gamingpb.Capability_CAP_RECLAIM {
+	if len(caps) != 1 || caps[0] != gamingpb.Capability_CAP_SET_NAMES {
 		t.Errorf("hello carried capabilities %v, want the configured single one", caps)
 	}
 	if got := f.hello.GetMinRefundBlocks(); got != 2048 {

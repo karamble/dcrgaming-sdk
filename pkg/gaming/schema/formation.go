@@ -25,6 +25,7 @@ func TermsFrom(t membership.Terms) Terms {
 		Seats:      t.Seats,
 		CSVBlocks:  t.CSVBlocks,
 		Until:      t.Until,
+		BondAtoms:  t.BondAtoms, BondLockBlocks: t.BondLockBlocks,
 	}
 }
 
@@ -38,6 +39,7 @@ func (t Terms) Into() membership.Terms {
 		Seats:      t.Seats,
 		CSVBlocks:  t.CSVBlocks,
 		Until:      t.Until,
+		BondAtoms:  t.BondAtoms, BondLockBlocks: t.BondLockBlocks,
 	}
 }
 

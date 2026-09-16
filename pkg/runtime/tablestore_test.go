@@ -25,7 +25,7 @@ func standAt(t *testing.T, g Rules, seedDir string, store TableStore) (*bridgete
 	t.Helper()
 	fake := bridgetest.New(bridgetest.Options{
 		Game: g.Identity().GameID, Network: "mainnet",
-		Params: chaincfg.TestNet3Params(), Height: 1000,
+		Params: chaincfg.TestNet3Params(), Height: 800,
 	})
 	srv, err := fake.Serve("seat0")
 	if err != nil {
@@ -48,13 +48,9 @@ func standAt(t *testing.T, g Rules, seedDir string, store TableStore) (*bridgete
 	if err != nil {
 		t.Fatalf("identity: %v", err)
 	}
-	if err := seed.SetBondDeposit(bondOutpoint); err != nil {
-		t.Fatalf("bond deposit: %v", err)
-	}
 	rt, err := New(Config{
 		Rules: g, Bridge: conn, Book: book, Tables: store,
 		Identity: seed, SeatTags: testTags, Params: chaincfg.TestNet3Params(),
-		PunishTag: []byte("testgame/punishkey/v1"),
 	})
 	if err != nil {
 		t.Fatalf("new: %v", err)
@@ -68,7 +64,7 @@ func standAt(t *testing.T, g Rules, seedDir string, store TableStore) (*bridgete
 func TestASeatedTableComesBackAfterARestart(t *testing.T) {
 	dir, store := t.TempDir(), NewMemTableStore()
 	fake, rt := standAt(t, &trivialGame{}, dir, store)
-	sid, them := seatTwo(t, fake, rt)
+	sid, _ := seatTwo(t, fake, rt)
 
 	rt.mu.Lock()
 	before := rt.tables[sid]
@@ -80,10 +76,6 @@ func TestASeatedTableComesBackAfterARestart(t *testing.T) {
 	wantSeats, _ := before.form.Seats()
 	wantRoster, _ := before.form.RosterHash()
 
-	// Announce, so the punishment keys are on the record too.
-	if err := rt.adoptPunishKey(context.Background(), sid, theirPunishNote(t, rt, sid, them)); err != nil {
-		t.Fatalf("adopt: %v", err)
-	}
 	// Where the money went.
 	rt.mu.Lock()
 	before.funded = map[uint32]staked{0: {outpoint: bondOutpoint, atoms: 5_000_000}}
@@ -126,16 +118,6 @@ func TestASeatedTableComesBackAfterARestart(t *testing.T) {
 	if out, atoms, ok := again.Funded(sid, 0); !ok || out != bondOutpoint || atoms != 5_000_000 {
 		t.Fatalf("the stake came back as %q/%d/%v", out, atoms, ok)
 	}
-	// Derived, never stored: the punishment key is back out of the seed.
-	if _, ok := again.ForfeitableBond(sid, 0); !ok {
-		t.Error("the forfeitable bonds did not come back")
-	}
-	again.mu.Lock()
-	hasKey := after.punish != nil
-	again.mu.Unlock()
-	if !hasKey {
-		t.Error("this seat's own punishment key did not come back")
-	}
 }
 
 // No key is ever written down. A stored table is a file on a disk that gets
@@ -144,10 +126,7 @@ func TestASeatedTableComesBackAfterARestart(t *testing.T) {
 func TestATableRecordHoldsNoKeys(t *testing.T) {
 	dir, store := t.TempDir(), NewMemTableStore()
 	fake, rt := standAt(t, &trivialGame{}, dir, store)
-	sid, them := seatTwo(t, fake, rt)
-	if err := rt.adoptPunishKey(context.Background(), sid, theirPunishNote(t, rt, sid, them)); err != nil {
-		t.Fatalf("adopt: %v", err)
-	}
+	sid, _ := seatTwo(t, fake, rt)
 	rt.mu.Lock()
 	tbl := rt.tables[sid]
 	rt.mu.Unlock()
@@ -161,15 +140,18 @@ func TestATableRecordHoldsNoKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
-	// The private keys this table has, none of which may appear.
-	rt.mu.Lock()
-	secrets := [][]byte{tbl.punish.Serialize()}
-	rt.mu.Unlock()
-	session, logKey, err := rt.seatKeys(tbl.form.Terms().SID)
+	// The private keys this table has, none of which may appear. Financial
+	// private keys are not in the game process at all; these are identity and
+	// gameplay keys derived from its seed.
+	session, logKey, err := rt.seatKeys(tbl.formation().Terms().SID)
 	if err != nil {
 		t.Fatalf("seat keys: %v", err)
 	}
-	secrets = append(secrets, session.Serialize(), logKey.Serialize())
+	bond, err := rt.seatBondKeyFor(sid)
+	if err != nil {
+		t.Fatalf("identity key: %v", err)
+	}
+	secrets := [][]byte{session.Serialize(), logKey.Serialize(), bond.Serialize()}
 	for _, secret := range secrets {
 		if strings.Contains(strings.ToLower(string(blob)), hex.EncodeToString(secret)) {
 			t.Fatal("a private key was written into the table record")
@@ -188,7 +170,7 @@ func TestBondTermsSurviveARestart(t *testing.T) {
 		t.Fatalf("accept: %v", err)
 	}
 	rt.mu.Lock()
-	want := rt.tables[sid].form.Terms()
+	want := rt.tables[sid].terms
 	rt.mu.Unlock()
 	if want.BondAtoms == 0 {
 		t.Fatal("this game states no bond, so the test proves nothing")
@@ -199,7 +181,7 @@ func TestBondTermsSurviveARestart(t *testing.T) {
 		t.Fatalf("resume: %v", err)
 	}
 	again.mu.Lock()
-	got := again.tables[sid].form.Terms()
+	got := again.tables[sid].terms
 	again.mu.Unlock()
 	if got.BondAtoms != want.BondAtoms || got.BondLockBlocks != want.BondLockBlocks {
 		t.Errorf("the bond terms came back as %d/%d, not %d/%d",
@@ -484,7 +466,7 @@ func TestACommittedTableComesBackWithEverySeatsCommit(t *testing.T) {
 	tbl := rt.tables[sid]
 	rt.mu.Unlock()
 
-	ours, err := tbl.form.Bind()
+	ours, err := tbl.formation().Bind()
 	if err != nil {
 		t.Fatalf("our commit: %v", err)
 	}
@@ -498,10 +480,10 @@ func TestACommittedTableComesBackWithEverySeatsCommit(t *testing.T) {
 	if err := them.form.AddCommit(ours); err != nil {
 		t.Fatalf("them taking ours: %v", err)
 	}
-	if got := len(tbl.form.Commits()); got != 2 {
+	if got := len(tbl.formation().Commits()); got != 2 {
 		t.Fatalf("the table holds %d commits, so this proves nothing", got)
 	}
-	wantState := tbl.form.State()
+	wantState := tbl.formation().State()
 
 	_, again := standAt(t, &trivialGame{}, dir, store)
 	if err := again.Resume(); err != nil {
@@ -535,7 +517,7 @@ func TestATableStillHoldingOurCoinCannotBeDropped(t *testing.T) {
 	if err != nil {
 		t.Fatalf("table: %v", err)
 	}
-	mine, ok := tbl.form.OurSeat()
+	mine, ok := tbl.formation().OurSeat()
 	if !ok {
 		t.Fatal("not seated")
 	}
@@ -548,16 +530,9 @@ func TestATableStillHoldingOurCoinCannotBeDropped(t *testing.T) {
 		{"a stake",
 			func() { tbl.funded = map[uint32]staked{mine: {outpoint: bondOutpoint, atoms: 5_000_000}} },
 			func() { tbl.funded = map[uint32]staked{} }},
-		{"a table bond",
-			func() {
-				tbl.tableBondFunded = map[uint32]staked{mine: {outpoint: bondOutpoint, atoms: 2_000_000}}
-			},
-			func() { tbl.tableBondFunded = map[uint32]staked{} }},
-		{"a forfeitable bond",
-			func() {
-				tbl.forfeitFunded = map[uint32]staked{mine: {outpoint: bondOutpoint, atoms: 2_000_000}}
-			},
-			func() { tbl.forfeitFunded = map[uint32]staked{} }},
+		{"the admission deposit",
+			func() { tbl.seatBond = staked{outpoint: bondOutpoint, atoms: 2_000_000} },
+			func() { tbl.seatBond = staked{} }},
 	} {
 		rt.mu.Lock()
 		tc.put()
@@ -604,9 +579,13 @@ func TestAnotherSeatsCoinDoesNotHoldTheTable(t *testing.T) {
 	fake, rt := standAt(t, &trivialGame{}, dir, store)
 	sid, _ := seatTwo(t, fake, rt)
 	tbl, _ := rt.tableOf(sid)
-	mine, _ := tbl.form.OurSeat()
+	mine, _ := tbl.formation().OurSeat()
 
 	rt.mu.Lock()
+	// The bridge-tracked admission deposit is ours and independently keeps the
+	// table recoverable. Clear it so this assertion isolates the other seat's
+	// stake.
+	tbl.seatBond = staked{}
 	tbl.funded = map[uint32]staked{1 - mine: {outpoint: bondOutpoint, atoms: 5_000_000}}
 	rt.mu.Unlock()
 	if rt.HoldsOurs(sid) {

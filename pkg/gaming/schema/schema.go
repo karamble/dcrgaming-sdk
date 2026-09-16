@@ -181,13 +181,15 @@ type Message struct {
 // Terms are what an invitation stated, carried so a peer can say "you and I
 // read different invitations" rather than only "our memberships differ".
 type Terms struct {
-	Game       string `json:"game"`
-	GameVer    int    `json:"gv"`
-	SID        string `json:"sid"`
-	BuyInAtoms uint64 `json:"buyin"`
-	Seats      uint32 `json:"seats"`
-	CSVBlocks  uint32 `json:"csv"`
-	Until      uint32 `json:"until"`
+	Game           string `json:"game"`
+	GameVer        int    `json:"gv"`
+	SID            string `json:"sid"`
+	BuyInAtoms     uint64 `json:"buyin"`
+	Seats          uint32 `json:"seats"`
+	CSVBlocks      uint32 `json:"csv"`
+	Until          uint32 `json:"until"`
+	BondAtoms      uint64 `json:"bond"`
+	BondLockBlocks uint32 `json:"bondcsv"`
 }
 
 // Join is one player's claim to a seat, and the bond that makes it cost
