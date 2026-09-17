@@ -96,22 +96,27 @@ func (p *Part) Expired(now time.Time) bool {
 // Parse reads a message body as a frame. The second return is false for
 // anything that is not one, which includes ordinary chat.
 func Parse(text string) (*Part, bool) {
+	// brclientd uses this same classifier to decide whether a message is
+	// protocol traffic or human chat. Never hide a body that the bridge would
+	// reject instead of processing.
+	if len(text) > 1<<20 {
+		return nil, false
+	}
 	m := partRE.FindStringSubmatch(strings.TrimSpace(text))
 	if m == nil {
 		return nil, false
 	}
 
 	p := &Part{}
-	seenVersion := false
+	seen := make(map[string]bool)
+	var seenVersion, seenGameVersion, seenExpiry bool
 	for _, tok := range strings.Split(m[1], ",") {
-		if tok == "" {
-			continue
-		}
 		k, v, ok := strings.Cut(tok, "=")
-		if !ok {
-			// A bare token is malformed, not an unknown extension.
+		if !ok || k == "" || seen[k] || strings.TrimSpace(k) != k {
+			// Bare, empty, duplicate and whitespace-padded keys are ambiguous.
 			return nil, false
 		}
+		seen[k] = true
 		switch k {
 		case "v":
 			n, err := strconv.Atoi(v)
@@ -128,6 +133,7 @@ func Parse(text string) (*Part, bool) {
 				return nil, false
 			}
 			p.GameVer = n
+			seenGameVersion = true
 		case "sid":
 			p.SID = v
 		case "mid":
@@ -152,16 +158,18 @@ func Parse(text string) (*Part, bool) {
 				return nil, false
 			}
 			p.Exp = n
+			seenExpiry = true
 		default:
 			// Unknown keys are ignored so a newer sender does not break
 			// an older receiver.
 		}
 	}
 
-	// The framing version is checked, but the game and its version are not:
-	// a client must be able to recognise - and therefore hide - traffic for
-	// a game it has never heard of.
-	if !seenVersion || p.Version != Version {
+	// Check the framing and required routing fields, but do not compare the game
+	// or game version to a local registry: a host must recognise - and therefore
+	// hide - traffic for games and versions it has never heard of.
+	if !seenVersion || p.Version != Version || !seenGameVersion || p.GameVer <= 0 ||
+		!seenExpiry || p.Exp < 0 {
 		return nil, false
 	}
 	if !gameRE.MatchString(p.Game) || len(p.Game) > MaxGameLen {

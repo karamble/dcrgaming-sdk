@@ -129,14 +129,22 @@ func TestParseLeavesChatAlone(t *testing.T) {
 
 func TestParseRejectsMalformedAttributes(t *testing.T) {
 	cases := map[string]string{
-		"no version":       "--gaming[game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1]--QUJD",
-		"future framing":   "--gaming[v=3,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1]--QUJD",
-		"no game":          "--gaming[v=2,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1]--QUJD",
-		"game not a key":   "--gaming[v=2,game=Poker!,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1]--QUJD",
-		"sid not hex":      "--gaming[v=2,game=poker,gv=1,sid=zz,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1]--QUJD",
-		"seq beyond total": "--gaming[v=2,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=3/2]--QUJD",
-		"seq zero":         "--gaming[v=2,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=0/2]--QUJD",
-		"too many parts":   "--gaming[v=2,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/999]--QUJD",
+		"no version":        "--gaming[game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1]--QUJD",
+		"future framing":    "--gaming[v=3,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1]--QUJD",
+		"no game":           "--gaming[v=2,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1]--QUJD",
+		"game not a key":    "--gaming[v=2,game=Poker!,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1]--QUJD",
+		"sid not hex":       "--gaming[v=2,game=poker,gv=1,sid=zz,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1]--QUJD",
+		"seq beyond total":  "--gaming[v=2,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=3/2]--QUJD",
+		"seq zero":          "--gaming[v=2,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=0/2]--QUJD",
+		"too many parts":    "--gaming[v=2,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/999]--QUJD",
+		"no game version":   "--gaming[v=2,game=poker,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1,exp=0]--QUJD",
+		"zero game version": "--gaming[v=2,game=poker,gv=0,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1,exp=0]--QUJD",
+		"no expiry":         "--gaming[v=2,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1]--QUJD",
+		"negative expiry":   "--gaming[v=2,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1,exp=-1]--QUJD",
+		"duplicate game":    "--gaming[v=2,game=poker,game=chess,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1,exp=0]--QUJD",
+		"duplicate unknown": "--gaming[v=2,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1,exp=0,x=1,x=2]--QUJD",
+		"empty attribute":   "--gaming[v=2,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1,exp=0,]--QUJD",
+		"padded key":        "--gaming[v=2,game=poker, gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1,exp=0]--QUJD",
 	}
 	for name, text := range cases {
 		if _, ok := Parse(text); ok {
