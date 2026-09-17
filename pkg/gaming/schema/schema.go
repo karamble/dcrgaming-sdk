@@ -36,30 +36,24 @@ import (
 type Kind string
 
 const (
-	// KindJoin is one player claiming a seat, signed by the key it
-	// announces. The signature is what lets it be relayed: a peer that
-	// missed one learns it from anyone who did and checks it, rather than
-	// taking their word for a key.
-	KindJoin Kind = "join"
+	// KindJoin is one player claiming a seat, signed by the key it announces.
+	// It is published once and recovered from the bridge's durable BR inbox.
+	KindJoin Kind = "table.seat"
 
-	// KindRoster announces the seats a table is playing with and the
-	// session keys their actions will be signed by, along with the joins
-	// they were computed from.
-	//
-	// It is revisable, and nobody acts on it. It exists to heal a channel
-	// that loses messages, so a peer holding fewer joins than it should can
-	// catch up. Settling on it would be settling on somebody's current
-	// opinion - that is what KindCommit is for.
-	KindRoster Kind = "roster"
+	// KindRoster is one participant's preparation of a complete candidate
+	// roster and the signed joins it was computed from. Each participant emits
+	// it once when its local table first becomes full. It is not a request and
+	// receiving it never echoes it.
+	KindRoster Kind = "table.roster_prepare"
 
 	// KindCommit binds its signer to one membership, for one session,
 	// irrevocably. Two of them from one key at one session are a proof
 	// anybody can check, the way two chain heads at one sequence are.
-	KindCommit Kind = "commit"
+	KindCommit Kind = "table.roster_commit"
 
 	// KindFunded is one member saying which output holds its stake. The
 	// chain is what makes it true; this only says who to attribute it to.
-	KindFunded Kind = "funded"
+	KindFunded Kind = "finance.stake"
 
 	// KindAction is one signed entry of the action log.
 	KindAction Kind = "action"
@@ -68,10 +62,6 @@ const (
 	// be. Under group-chat fan-out no member sees another's stream, so
 	// these are how a fork is found at all.
 	KindHead Kind = "head"
-
-	// KindResync asks for the entries a member is missing, and answers.
-	KindResync      Kind = "resync"
-	KindResyncReply Kind = "resync_reply"
 
 	// KindDispute carries evidence that a seat contradicted itself. It is
 	// self-contained: whoever receives it can check it without asking
@@ -100,7 +90,7 @@ const (
 
 	// KindBonded is one member saying which output holds its forfeitable
 	// bond. Like KindFunded, the chain is what makes it true.
-	KindBonded Kind = "bonded"
+	KindBonded Kind = "finance.bond"
 
 	// KindAccusation is a signature on a future accusation against a seat,
 	// agreed while the table is still cooperating.
@@ -123,7 +113,7 @@ const (
 	KindRelease Kind = "release"
 
 	// KindPayout is one member saying where it wants to be paid.
-	KindPayout Kind = "payout"
+	KindPayout Kind = "finance.payout_destination"
 
 	// KindLeaving is a seat saying it is getting up.
 	//
@@ -260,32 +250,6 @@ type Head struct {
 	Seat   uint32 `json:"seat"`
 	Signer string `json:"signer"`
 	Sig    string `json:"sig"`
-}
-
-// Resync asks for everything after a sequence number.
-//
-// It also says what the asker holds of the table's formation, because the same
-// reconnection that loses log entries loses joins and commits, and those are
-// not in the log. A peer short of one member's commit is waiting on a message
-// nobody will send a second time, and would wait forever. Naming what it has
-// keeps the answer to the difference rather than to the whole table: both lists
-// are hex compressed session keys.
-type Resync struct {
-	After   uint64   `json:"after"`
-	Joins   []string `json:"joins,omitempty"`
-	Commits []string `json:"commits,omitempty"`
-}
-
-// ResyncReply carries the missing entries, in order.
-//
-// Joins and commits travel whole and signed, so a peer that answers with
-// something it invented has the answer rejected rather than believed. That is
-// the same property that lets a join be relayed by anyone at all: the receiver
-// checks it instead of trusting whoever passed it along.
-type ResyncReply struct {
-	Entries []gamelog.TranscriptEntry `json:"entries"`
-	Joins   []Join                    `json:"joins,omitempty"`
-	Commits []Commit                  `json:"commits,omitempty"`
 }
 
 // Dispute is evidence that one seat signed two different things at one point in

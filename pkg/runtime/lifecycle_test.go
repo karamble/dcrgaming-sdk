@@ -26,7 +26,7 @@ func TestAdmissionMustPersistBeforePayment(t *testing.T) {
 		t.Fatal("storage fault not latched")
 	}
 }
-func TestPendingAdmissionRestoresAndResyncs(t *testing.T) {
+func TestPendingAdmissionRestores(t *testing.T) {
 	fake, rt := standPerTable(t)
 	fake.SetVerdict(bridgetest.Hold, "")
 	sid, err := rt.AcceptInvite(context.Background(), invite(t, nil), testGCID)
@@ -38,7 +38,6 @@ func TestPendingAdmissionRestoresAndResyncs(t *testing.T) {
 	if err != nil || len(records) != 1 {
 		t.Fatalf("pending table missing: %v", err)
 	}
-	rt.Resync(context.Background())
 	if err = rt.Fund(context.Background(), sid); !errors.Is(err, ErrNotSeated) {
 		t.Fatalf("pending fund: %v", err)
 	}
@@ -61,7 +60,6 @@ func TestPendingAdmissionRestoresAndResyncs(t *testing.T) {
 	if err != nil || snap.Phase != "admission" {
 		t.Fatalf("snapshot: %+v %v", snap, err)
 	}
-	again.Resync(context.Background())
 	if _, err = again.AcceptInvite(context.Background(), invite(t, nil), testGCID); err != nil {
 		t.Fatal(err)
 	}

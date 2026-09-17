@@ -85,7 +85,7 @@ func (f *fakeBridge) Subscribe(_ *gamingpb.SubscribeRequest, stream grpc.ServerS
 
 // dialFake stands the bridge up and connects a game to it, the way an operator
 // would: the game holds a credential and the bridge's certificate to pin.
-func dialFake(t *testing.T, f *fakeBridge, onGap func([]string)) *Bridge {
+func dialFake(t *testing.T, f *fakeBridge, _ func([]string)) *Bridge {
 	t.Helper()
 
 	serverCert, serverKey := selfSigned(t, "bridge")
@@ -117,7 +117,6 @@ func dialFake(t *testing.T, f *fakeBridge, onGap func([]string)) *Bridge {
 		GameID:        "poker",
 		GameVer:       5,
 		ClientVersion: "dcrpoker",
-		OnGap:         onGap,
 	})
 	if err != nil {
 		t.Fatalf("dial the bridge: %v", err)
@@ -204,83 +203,6 @@ func TestARefusalKeepsItsReason(t *testing.T) {
 	}
 	if !contains(err.Error(), "per-day cap") {
 		t.Fatalf("the refusal lost its reason on the way: %v", err)
-	}
-}
-
-// The game resynchronises when the bridge says to, and not otherwise.
-//
-// This is the whole of the gap contract. Resynchronising on its own reconnect
-// loop would cost one resync per failed dial per table; not resynchronising
-// when frames really were lost leaves the table disagreeing with its peers.
-func TestAGapIsDeclaredByTheBridgeAndNobodyElse(t *testing.T) {
-	gaps := make(chan []string, 4)
-	f := &fakeBridge{
-		game: "poker",
-		start: &gamingpb.StreamStart{
-			Epoch: "e1", Gap: true,
-			GapScope: gamingpb.GapScope_GAP_SCOPED,
-			GapGcids: []string{"table-one"},
-		},
-	}
-	c := dialFake(t, f, func(gcids []string) { gaps <- gcids })
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if _, err := c.Events(ctx); err != nil {
-		t.Fatalf("open the stream: %v", err)
-	}
-
-	select {
-	case got := <-gaps:
-		if len(got) != 1 || got[0] != "table-one" {
-			t.Fatalf("the gap named %v, not the table the bridge said", got)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("the bridge declared a gap and the game never heard about it, so it will act " +
-			"on a table state it never received")
-	}
-}
-
-func TestNoGapMeansNoResync(t *testing.T) {
-	gaps := make(chan []string, 4)
-	f := &fakeBridge{
-		game:  "poker",
-		start: &gamingpb.StreamStart{Epoch: "e1"},
-		// A frame queued behind the opening event. Everything below is
-		// sequenced against its arrival rather than against a clock.
-		events: []*gamingpb.BridgeEvent{{
-			Event: &gamingpb.BridgeEvent_Frame{Frame: &gamingpb.Frame{
-				Seq: 1, Gcid: "table-one", From: "bob", Frame: "--gaming[..]--QUJD",
-			}},
-		}},
-	}
-	c := dialFake(t, f, func(gcids []string) { gaps <- gcids })
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	frames, err := c.Events(ctx)
-	if err != nil {
-		t.Fatalf("open the stream: %v", err)
-	}
-
-	// The frame cannot arrive before the opening event was handled, because
-	// they cross the same stream in that order. So once it is here, whatever
-	// the opening event was going to do has been done - and asking about the
-	// gap channel is a question about the past rather than a race with it.
-	select {
-	case got := <-frames:
-		if got.GCID != "table-one" {
-			t.Fatalf("the stream delivered %+v", got)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("nothing came off the stream at all, so this asserts nothing")
-	}
-
-	select {
-	case <-gaps:
-		t.Fatal("a stream that missed nothing told the game to resynchronise, so a brief " +
-			"outage would cost a resync per reconnect attempt per table")
-	default:
 	}
 }
 

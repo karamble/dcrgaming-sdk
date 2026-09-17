@@ -2,7 +2,7 @@
 //
 // A frame is one message body:
 //
-//	--gaming[v=1,game=poker,gv=1,sid=<hex>,mid=<hex>,seq=<n>/<total>,exp=<unix>]--<base64>
+//	--gaming[v=2,game=poker,gv=1,sid=<hex>,mid=<blake256>,seq=<n>/<total>,exp=<unix>]--<base64>
 //
 // It is the sibling of brmcp's --mcp[…]--, and copies its framing deliberately:
 // the anchored whole-body match, the base64-restricted payload, order-
@@ -25,19 +25,23 @@
 package wire
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/decred/dcrd/crypto/blake256"
 )
 
 // Version is the framing version. It is separate from a game's own protocol
 // version on purpose: a breaking change to poker's rules must not invalidate
 // another game's traffic, and brmcp gets away with a single version only
 // because it carries one kind of payload.
-const Version = 1
+const Version = 2
 
 const (
 	// DefaultChunkSize is the raw bytes per part, before base64. Base64
@@ -60,7 +64,8 @@ var (
 	// brackets so a body cannot smuggle a second tag past the match.
 	partRE = regexp.MustCompile(`^--gaming\[([^\]]*)\]--([A-Za-z0-9+/=\s]*)$`)
 
-	idRE   = regexp.MustCompile(`^[0-9a-f]{1,32}$`)
+	sidRE  = regexp.MustCompile(`^[0-9a-f]{1,32}$`)
+	midRE  = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	gameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]*$`)
 )
 
@@ -68,7 +73,7 @@ var (
 // filters must refuse any rule matching it: Bison Relay applies filters on the
 // live receive path, so a rule that swallows these drops a player out of a hand
 // with funds escrowed, looking exactly like walking away.
-const SampleEnvelope = `--gaming[v=1,game=poker,gv=1,sid=0123456789abcdef,mid=0123456789abcdef,seq=1/1,exp=1783000000]--eyJhY3Rpb24iOiJmb2xkIn0=`
+const SampleEnvelope = `--gaming[v=2,game=poker,gv=1,sid=0123456789abcdef,mid=5736684151c34f0a17823de6822769dfafeb3170477c2079dec9d72e35aa5c5f,seq=1/1,exp=0]--eyJhY3Rpb24iOiJmb2xkIn0=`
 
 // Part is one frame of a possibly chunked message.
 type Part struct {
@@ -162,7 +167,7 @@ func Parse(text string) (*Part, bool) {
 	if !gameRE.MatchString(p.Game) || len(p.Game) > MaxGameLen {
 		return nil, false
 	}
-	if !idRE.MatchString(p.SID) || !idRE.MatchString(p.MID) {
+	if !sidRE.MatchString(p.SID) || !midRE.MatchString(p.MID) {
 		return nil, false
 	}
 	if p.Seq < 1 || p.Total < 1 || p.Seq > p.Total || p.Total > MaxParts {
@@ -189,7 +194,7 @@ func Encode(game string, gameVer int, sid string, payload []byte, exp time.Time,
 	if !gameRE.MatchString(game) || len(game) > MaxGameLen {
 		return nil, fmt.Errorf("game %q is not a valid routing key", game)
 	}
-	if !idRE.MatchString(sid) {
+	if !sidRE.MatchString(sid) {
 		return nil, fmt.Errorf("session id %q is not 1-32 lowercase hex", sid)
 	}
 	if len(payload) == 0 {
@@ -203,10 +208,7 @@ func Encode(game string, gameVer int, sid string, payload []byte, exp time.Time,
 	if total > MaxParts {
 		return nil, fmt.Errorf("payload needs %d parts, over the %d part limit", total, MaxParts)
 	}
-	mid, err := NewID()
-	if err != nil {
-		return nil, err
-	}
+	mid := messageID(game, gameVer, sid, payload)
 
 	var expUnix int64
 	if !exp.IsZero() {
@@ -224,4 +226,23 @@ func Encode(game string, gameVer int, sid string, payload []byte, exp time.Time,
 			Version, game, gameVer, sid, mid, i+1, total, expUnix, b64))
 	}
 	return out, nil
+}
+
+// messageID is the stable identity of one immutable application/control
+// payload. Deadlines and fragmentation are transport details and deliberately
+// excluded, so an explicit retry produces the same MID instead of another
+// logical message.
+func messageID(game string, gameVer int, sid string, payload []byte) string {
+	var pre bytes.Buffer
+	pre.WriteString("dcrgaming/event/v2\x00")
+	writeBytes := func(b []byte) {
+		_ = binary.Write(&pre, binary.BigEndian, uint32(len(b)))
+		pre.Write(b)
+	}
+	writeBytes([]byte(game))
+	_ = binary.Write(&pre, binary.BigEndian, uint32(gameVer))
+	writeBytes([]byte(sid))
+	writeBytes(payload)
+	sum := blake256.Sum256(pre.Bytes())
+	return fmt.Sprintf("%x", sum[:])
 }

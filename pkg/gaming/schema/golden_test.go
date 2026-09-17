@@ -15,8 +15,8 @@ import (
 // sha256, for one commit built entirely from literals.
 func TestTheEncodedEnvelopeIsPinned(t *testing.T) {
 	const (
-		wantJSON = `{"v":5,"kind":"commit","match":"b7c8d9e0f1a20314","body":{"roster":"5f00d1e2c3b4a5968778695a4b3c2d1e0f1e2d3c4b5a69788796a5b4c3d2e1f0","signer":"02b1c2d3e4f5061728394a5b6c7d8e9fa0b1c2d3e4f5061728394a5b6c7d8e9fa0","sig":"3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b"}}`
-		wantSHA  = "3b1c20d027f883111898ec9010e1e598c04178ce70dde0a1378175bfd680b14b"
+		wantJSON = `{"v":5,"kind":"table.roster_commit","match":"b7c8d9e0f1a20314","body":{"roster":"5f00d1e2c3b4a5968778695a4b3c2d1e0f1e2d3c4b5a69788796a5b4c3d2e1f0","signer":"02b1c2d3e4f5061728394a5b6c7d8e9fa0b1c2d3e4f5061728394a5b6c7d8e9fa0","sig":"3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b"}}`
+		wantSHA  = "bef2543b9f194a98dc1a9106d0804a3deed1d84a8b6370c9c2e97869ddce1494"
 	)
 	sum := sha256.Sum256([]byte(wantJSON))
 	if got := hex.EncodeToString(sum[:]); got != wantSHA {

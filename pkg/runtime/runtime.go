@@ -238,7 +238,7 @@ func (r *Runtime) deliver(d transport.Delivery) {
 func (r *Runtime) ours(k schema.Kind) bool {
 	switch k {
 	case schema.KindJoin, schema.KindCommit,
-		KindFunded, KindBonded, KindPayout, KindRoster, KindResync, KindResyncReply:
+		KindFunded, KindBonded, KindPayout, KindRoster:
 		return true
 	}
 	return false
@@ -268,20 +268,6 @@ func (r *Runtime) handleOurs(ctx context.Context, msg Message) error {
 			return fmt.Errorf("read a commit: %w", err)
 		}
 		return r.addCommit(ctx, msg.Match, c)
-
-	case KindResync:
-		var ask schema.Resync
-		if err := json.Unmarshal(msg.Body, &ask); err != nil {
-			return fmt.Errorf("read a resync: %w", err)
-		}
-		return r.answerResync(ctx, msg.Match, ask)
-
-	case KindResyncReply:
-		var reply schema.ResyncReply
-		if err := json.Unmarshal(msg.Body, &reply); err != nil {
-			return fmt.Errorf("read a resync answer: %w", err)
-		}
-		return r.adoptResync(ctx, msg.Match, reply)
 
 	case KindRoster:
 		var ros schema.Roster
@@ -343,19 +329,6 @@ func (r *Runtime) Run(ctx context.Context) error {
 	for _, t := range pending {
 		r.startAdmission(t)
 	}
-
-	// The bridge says when it dropped frames, and a dropped formation
-	// message is one nobody will send again. Registered before the stream
-	// opens, because the first thing a reconnecting bridge reports is the
-	// gap it just had.
-	r.bridge.SetOnGap(func(gcids []string) {
-		if len(gcids) > 0 {
-			r.log.Warnf("the bridge missed frames for %d table(s); asking for what we are short of", len(gcids))
-		} else {
-			r.log.Warnf("the bridge missed frames and could not say which tables; asking for what we are short of")
-		}
-		r.Resync(ctx)
-	})
 
 	frames, err := r.bridge.Events(ctx)
 	if err != nil {

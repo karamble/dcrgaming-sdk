@@ -44,7 +44,7 @@ const (
 	// ClassDispute is evidence, and must outlive the dispute window.
 	ClassDispute
 	// ClassForm is formation traffic: joins, rosters, commits and the
-	// resyncs that carry them. Its real staleness gate is not a clock at
+	// messages that carry them. Its real staleness gate is not a clock at
 	// all - a join is admitted or refused by where the chain stands against
 	// the table's Until height, and a formation that closed no-ops every
 	// late arrival - so the wire deadline only has to outlive a relay
@@ -56,6 +56,10 @@ const (
 	// admitted - and the advance invariant already resolves that to no
 	// game, never two tables.
 	ClassForm
+	// ClassDurable is an immutable state transition recovered from BR history.
+	// Its protocol reducer, table deadline or sequence decides applicability;
+	// transport time never does.
+	ClassDurable
 )
 
 // TTL is how long a message of this class stays valid.
@@ -74,12 +78,19 @@ func (c Class) TTL() time.Duration {
 		// because an expiry is still the backstop against a relay
 		// replaying ancient traffic at a fresh session id.
 		return 24 * time.Hour
+	case ClassDurable:
+		return 0
 	}
 	return 90 * time.Second
 }
 
 // Deadline is the expiry to stamp on a message of this class.
-func (c Class) Deadline(now time.Time) time.Time { return now.Add(c.TTL()) }
+func (c Class) Deadline(now time.Time) time.Time {
+	if c == ClassDurable {
+		return time.Time{}
+	}
+	return now.Add(c.TTL())
+}
 
 // AssemblerConfig bounds reassembly.
 type AssemblerConfig struct {

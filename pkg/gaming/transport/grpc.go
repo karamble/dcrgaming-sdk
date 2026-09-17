@@ -65,15 +65,6 @@ type BridgeConfig struct {
 	// Log, if set, records connection trouble. Nothing here is fatal, so
 	// without it a game reconnecting in a loop does so silently.
 	Log slog.Logger
-
-	// OnGap, if set, is called when the bridge says frames were missed, with
-	// the tables it named - empty meaning it could not say which.
-	//
-	// Called only when the bridge declares a gap, never merely because the
-	// stream reconnected. A game that resynchronised on its own reconnect
-	// loop would pay for one resync per failed dial per table, which is
-	// exactly what the bridge declaring it is for.
-	OnGap func(gcids []string)
 }
 
 // Bridge is a game's connection to a bridge.
@@ -302,9 +293,3 @@ func Unreachable(err error) bool {
 	}
 	return false
 }
-
-// SetOnGap registers what to do when the bridge says frames were missed.
-//
-// Set after construction because the thing that resynchronises is built from
-// this connection, so neither can be the other's argument.
-func (c *Bridge) SetOnGap(f func(gcids []string)) { c.cfg.OnGap = f }

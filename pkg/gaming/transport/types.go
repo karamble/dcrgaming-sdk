@@ -17,6 +17,7 @@ type InboundFrame struct {
 	GCID  string `json:"gcid"`
 	From  string `json:"from"`
 	Frame string `json:"frame"`
+	ack   func()
 }
 
 // Receive feeds frames from the host into a router until ctx is cancelled.
@@ -39,6 +40,9 @@ func Receive(ctx context.Context, frames <-chan InboundFrame, r *Router) {
 			// game it serves, and a host that got it wrong should not
 			// be able to inject another game's traffic.
 			r.HandleGCMessage(f.GCID, f.From, f.Frame, time.Now())
+			if f.ack != nil {
+				f.ack()
+			}
 		}
 	}
 }

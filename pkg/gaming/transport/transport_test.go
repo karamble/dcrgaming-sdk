@@ -160,8 +160,10 @@ func TestChunkedMessageReassemblesOutOfOrder(t *testing.T) {
 	var got []Delivery
 	r := newRouter(t, send, allowAll, &got)
 
-	body := schema.Resync{After: 7}
-	payload, err := schema.Encode(5, schema.KindResync, testMatch, body)
+	body := struct {
+		After uint64 `json:"after"`
+	}{After: 7}
+	payload, err := schema.Encode(5, schema.Kind("app.test"), testMatch, body)
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -179,7 +181,9 @@ func TestChunkedMessageReassemblesOutOfOrder(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("delivered %d messages, want 1", len(got))
 	}
-	var back schema.Resync
+	var back struct {
+		After uint64 `json:"after"`
+	}
 	if err := got[0].Msg.Into(&back); err != nil {
 		t.Fatalf("into: %v", err)
 	}
@@ -195,7 +199,7 @@ func TestChunksFromDifferentSendersDoNotMerge(t *testing.T) {
 	var got []Delivery
 	r := newRouter(t, send, allowAll, &got)
 
-	payload, _ := schema.Encode(5, schema.KindResync, testMatch, schema.Resync{After: 1})
+	payload, _ := schema.Encode(5, schema.Kind("app.test"), testMatch, map[string]uint64{"after": 1})
 	parts, _ := wire.Encode("poker", 5, testSID, payload, time.Time{}, 16)
 
 	// Interleave one sender's first part with another's whole message.
@@ -223,7 +227,7 @@ func TestMissingAuthorizeAllowsNobody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new router: %v", err)
 	}
-	payload, _ := schema.Encode(5, schema.KindResync, testMatch, schema.Resync{After: 1})
+	payload, _ := schema.Encode(5, schema.Kind("app.test"), testMatch, map[string]uint64{"after": 1})
 	parts, _ := wire.Encode("poker", 5, testSID, payload, time.Time{}, 0)
 
 	r.HandleGCMessage(testGCID, alice, parts[0], time.Now())
@@ -285,7 +289,7 @@ func TestReceiveFeedsTheRouterAndStops(t *testing.T) {
 		t.Fatalf("new router: %v", err)
 	}
 
-	payload, _ := schema.Encode(5, schema.KindResync, testMatch, schema.Resync{After: 3})
+	payload, _ := schema.Encode(5, schema.Kind("app.test"), testMatch, map[string]uint64{"after": 3})
 	parts, _ := wire.Encode("poker", 5, testSID, payload, time.Time{}, 0)
 
 	frames := make(chan InboundFrame, 1)

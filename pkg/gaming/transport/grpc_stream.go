@@ -111,32 +111,19 @@ func (c *Bridge) streamOnce(ctx context.Context) error {
 	}
 }
 
-// handleStart records where the stream begins, and says so if frames were lost.
+// handleStart records where the stream begins. The bridge replays its durable
+// inbox from the requested sequence; peers never exchange resync requests.
 func (c *Bridge) handleStart(start *gamingpb.StreamStart) {
 	c.setStatus(Subscribed)
 	c.mu.Lock()
 	c.epoch, c.lastSeq = start.GetEpoch(), start.GetFromSeq()
 	c.mu.Unlock()
 
-	if !start.GetGap() {
-		c.debugf("stream open at %d, nothing missed", start.GetFromSeq())
-		return
-	}
-	// Only here. The bridge is the only thing that knows whether anything
-	// was actually lost, and this is the only place it says so.
-	c.warnf("the bridge missed frames for this game (%s, %d table(s) named)",
-		start.GetGapScope(), len(start.GetGapGcids()))
-	if c.cfg.OnGap != nil {
-		c.cfg.OnGap(start.GetGapGcids())
-	}
+	c.debugf("stream open at %d", start.GetFromSeq())
 }
 
 // handleFrame passes one frame on, and remembers how far the stream got.
 func (c *Bridge) handleFrame(ctx context.Context, f *gamingpb.Frame) {
-	c.mu.Lock()
-	c.lastSeq = f.GetSeq()
-	c.mu.Unlock()
-
 	// Blocking here is deliberate. The router on the other end is what turns
 	// a frame into a table's state, and dropping one silently would be a
 	// table that disagrees with its peers about what happened.
@@ -146,6 +133,13 @@ func (c *Bridge) handleFrame(ctx context.Context, f *gamingpb.Frame) {
 		GCID:  f.GetGcid(),
 		From:  f.GetFrom(),
 		Frame: f.GetFrame(),
+		ack: func() {
+			c.mu.Lock()
+			if f.GetSeq() > c.lastSeq {
+				c.lastSeq = f.GetSeq()
+			}
+			c.mu.Unlock()
+		},
 	}:
 	case <-ctx.Done():
 	}

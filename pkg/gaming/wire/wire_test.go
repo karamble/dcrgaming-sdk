@@ -31,6 +31,40 @@ func TestEncodeRoundTripsASinglePart(t *testing.T) {
 	}
 }
 
+func TestEncodeUsesStableMessageID(t *testing.T) {
+	payload := []byte(`{"kind":"table.seat","body":"same event"}`)
+	a, err := Encode("stakewars", 2, testSID, payload, time.Unix(100, 0), 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Encode("stakewars", 2, testSID, payload, time.Unix(200, 0), 11)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pa, ok := Parse(a[0])
+	if !ok {
+		t.Fatal("first encoding did not parse")
+	}
+	pb, ok := Parse(b[0])
+	if !ok {
+		t.Fatal("second encoding did not parse")
+	}
+	if pa.MID != pb.MID {
+		t.Fatalf("same immutable event got different IDs: %s != %s", pa.MID, pb.MID)
+	}
+	if len(pa.MID) != 64 {
+		t.Fatalf("MID has %d hex characters, want full BLAKE-256", len(pa.MID))
+	}
+	c, err := Encode("stakewars", 2, testSID, append(payload, '!'), time.Time{}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pc, _ := Parse(c[0])
+	if pc.MID == pa.MID {
+		t.Fatal("different payload reused the same event ID")
+	}
+}
+
 func TestChunkedMessageReassembles(t *testing.T) {
 	payload := bytes.Repeat([]byte("abcdefgh"), 100) // 800 bytes
 	parts, err := Encode("poker", 1, testSID, payload, time.Time{}, 100)
@@ -78,14 +112,14 @@ func TestParseLeavesChatAlone(t *testing.T) {
 		"hello",
 		"look at " + frame,
 		frame + " what do you think",
-		"--mcp[v=1,sid=ab,mid=cd,seq=1/1,exp=0]--QUJD",
+		"--mcp[v=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1,exp=0]--QUJD",
 		"--embed[type=image/png,data=AAAA]--",
 		// A bare token is malformed rather than an unknown extension.
-		"--gaming[v=1,game=poker,gv=1,sid=ab,mid=cd,seq=1/1,nonsense]--QUJD",
+		"--gaming[v=2,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1,nonsense]--QUJD",
 		// Empty payloads carry nothing.
-		"--gaming[v=1,game=poker,gv=1,sid=ab,mid=cd,seq=1/1,exp=0]--",
+		"--gaming[v=2,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1,exp=0]--",
 		// Payload that is not base64.
-		"--gaming[v=1,game=poker,gv=1,sid=ab,mid=cd,seq=1/1,exp=0]--not base64 here",
+		"--gaming[v=2,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1,exp=0]--not base64 here",
 	} {
 		if _, ok := Parse(text); ok {
 			t.Errorf("ordinary text parsed as a frame: %q", text)
@@ -95,14 +129,14 @@ func TestParseLeavesChatAlone(t *testing.T) {
 
 func TestParseRejectsMalformedAttributes(t *testing.T) {
 	cases := map[string]string{
-		"no version":       "--gaming[game=poker,gv=1,sid=ab,mid=cd,seq=1/1]--QUJD",
-		"future framing":   "--gaming[v=2,game=poker,gv=1,sid=ab,mid=cd,seq=1/1]--QUJD",
-		"no game":          "--gaming[v=1,gv=1,sid=ab,mid=cd,seq=1/1]--QUJD",
-		"game not a key":   "--gaming[v=1,game=Poker!,gv=1,sid=ab,mid=cd,seq=1/1]--QUJD",
-		"sid not hex":      "--gaming[v=1,game=poker,gv=1,sid=zz,mid=cd,seq=1/1]--QUJD",
-		"seq beyond total": "--gaming[v=1,game=poker,gv=1,sid=ab,mid=cd,seq=3/2]--QUJD",
-		"seq zero":         "--gaming[v=1,game=poker,gv=1,sid=ab,mid=cd,seq=0/2]--QUJD",
-		"too many parts":   "--gaming[v=1,game=poker,gv=1,sid=ab,mid=cd,seq=1/999]--QUJD",
+		"no version":       "--gaming[game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1]--QUJD",
+		"future framing":   "--gaming[v=3,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1]--QUJD",
+		"no game":          "--gaming[v=2,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1]--QUJD",
+		"game not a key":   "--gaming[v=2,game=Poker!,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1]--QUJD",
+		"sid not hex":      "--gaming[v=2,game=poker,gv=1,sid=zz,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1]--QUJD",
+		"seq beyond total": "--gaming[v=2,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=3/2]--QUJD",
+		"seq zero":         "--gaming[v=2,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=0/2]--QUJD",
+		"too many parts":   "--gaming[v=2,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/999]--QUJD",
 	}
 	for name, text := range cases {
 		if _, ok := Parse(text); ok {
@@ -114,7 +148,7 @@ func TestParseRejectsMalformedAttributes(t *testing.T) {
 // A game this build has never heard of still has to be recognised as protocol
 // traffic, or an old client would show a new game's frames as chat.
 func TestUnknownGameStillParses(t *testing.T) {
-	p, ok := Parse("--gaming[v=1,game=chess,gv=9,sid=ab,mid=cd,seq=1/1,exp=0]--QUJD")
+	p, ok := Parse("--gaming[v=2,game=chess,gv=9,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1,exp=0]--QUJD")
 	if !ok {
 		t.Fatal("a frame for another game must still be recognised")
 	}
@@ -151,7 +185,8 @@ func TestAssemblerBoundsWhatOneSenderCanHold(t *testing.T) {
 	// Each message starts but never finishes.
 	started := 0
 	for i := 0; i < 5; i++ {
-		parts, err := Encode("poker", 1, testSID, bytes.Repeat([]byte("y"), 300), time.Time{}, 100)
+		payload := append(bytes.Repeat([]byte("y"), 300), byte(i))
+		parts, err := Encode("poker", 1, testSID, payload, time.Time{}, 100)
 		if err != nil {
 			t.Fatalf("encode: %v", err)
 		}
@@ -251,6 +286,20 @@ func TestFormationOutlivesABacklog(t *testing.T) {
 	a := NewAssembler(AssemblerConfig{})
 	if _, err := a.Add("gc/alice", p, sent.Add(11*time.Minute)); err != nil {
 		t.Fatalf("an 11 minute old formation frame was refused: %v", err)
+	}
+}
+
+func TestDurableStateHasNoTransportExpiry(t *testing.T) {
+	if ClassDurable.TTL() != 0 || !ClassDurable.Deadline(time.Now()).IsZero() {
+		t.Fatal("durable one-shot state must remain valid in BR history")
+	}
+	frames, err := Encode("poker", 1, "0011223344556677", []byte("state"), ClassDurable.Deadline(time.Now()), 0)
+	if err != nil || len(frames) != 1 {
+		t.Fatalf("encode: %v (%d frames)", err, len(frames))
+	}
+	part, ok := Parse(frames[0])
+	if !ok || part.Exp != 0 {
+		t.Fatalf("durable frame expiry = %d", part.Exp)
 	}
 }
 

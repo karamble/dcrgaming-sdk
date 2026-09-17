@@ -193,7 +193,7 @@ func (r *Runtime) willCoSign(match string, seat uint32) bool {
 // arranged, and a game that could forge one could arrange it differently -
 // which is why the runtime keeps them rather than offering them.
 func (r *Runtime) Send(ctx context.Context, match string, kind schema.Kind, body any, class wire.Class) error {
-	if r.ours(kind) {
+	if strings.HasPrefix(string(kind), "table.") || strings.HasPrefix(string(kind), "finance.") {
 		return fmt.Errorf(
 			"%q is one of the runtime's own messages and is not a game's to send", kind)
 	}

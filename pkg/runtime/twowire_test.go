@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/bridgetest"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/connect"
+	"github.com/karamble/dcrgaming-sdk/pkg/gaming/gamingpb"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/schema"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/transport"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/wire"
@@ -129,6 +131,48 @@ func TestTwoRuntimesSeatEachOtherOverTheWire(t *testing.T) {
 	}
 }
 
+func TestTwoSeatFormationPublishesEachTransitionOnce(t *testing.T) {
+	p := seatedWirePair(t, nil)
+	want := map[schema.Kind]int{
+		schema.KindJoin: 2, KindRoster: 2, schema.KindCommit: 2,
+	}
+	got := wireKinds(t, p.fake.Sent())
+	if len(got) != len(want) {
+		t.Fatalf("formation kinds = %v, want %v", got, want)
+	}
+	for kind, count := range want {
+		if got[kind] != count {
+			t.Fatalf("%s publications = %d, want %d (all = %v)", kind, got[kind], count, got)
+		}
+	}
+
+	before := len(p.fake.Sent())
+	for i := 0; i < 20; i++ {
+		p.block()
+	}
+	time.Sleep(100 * time.Millisecond)
+	if after := len(p.fake.Sent()); after != before {
+		t.Fatalf("idle chain ticks published %d additional frames", after-before)
+	}
+}
+
+func wireKinds(t *testing.T, frames []*gamingpb.Frame) map[schema.Kind]int {
+	t.Helper()
+	got := make(map[schema.Kind]int)
+	for _, frame := range frames {
+		part, ok := wire.Parse(frame.GetFrame())
+		if !ok || part.Total != 1 {
+			t.Fatalf("formation emitted malformed or fragmented frame: %q", frame.GetFrame())
+		}
+		msg, err := schema.Decode(1, part.Chunk)
+		if err != nil {
+			t.Fatalf("decode formation frame: %v", err)
+		}
+		got[msg.Kind]++
+	}
+	return got
+}
+
 func TestSnapshotsExposeEverySeatsAdmissionBond(t *testing.T) {
 	p := seatedWirePair(t, nil)
 	for name, rt := range map[string]*Runtime{"one": p.one, "two": p.two} {
@@ -163,6 +207,13 @@ func TestCooperativePayoutNeedsBothBridgeApprovals(t *testing.T) {
 		p.block()
 		return fundedByEverySeat(p.one, p.sid) && fundedByEverySeat(p.two, p.sid)
 	})
+	wantWire := map[schema.Kind]int{
+		schema.KindJoin: 2, KindRoster: 2, schema.KindCommit: 2,
+		KindFunded: 2, KindPayout: 2,
+	}
+	if got := wireKinds(t, p.fake.Sent()); !reflect.DeepEqual(got, wantWire) {
+		t.Fatalf("funded table wire publications = %v, want %v", got, wantWire)
+	}
 
 	winner, _ := p.one.Seat(p.sid)
 	pot := int64(p.one.Terms(p.sid).BuyInAtoms) * 2
@@ -258,7 +309,7 @@ func TestAGamesOwnMessageCrossesAndFinancialMessagesCannotBeForged(t *testing.T)
 
 	for _, kind := range []schema.Kind{
 		schema.KindJoin, schema.KindCommit, KindRoster, KindFunded, KindBonded,
-		KindPayout, KindResync, KindResyncReply,
+		KindPayout,
 	} {
 		err := p.one.Send(p.ctx, p.sid, kind, map[string]any{}, wire.ClassTurn)
 		if err == nil || !strings.Contains(err.Error(), "not a game's to send") {

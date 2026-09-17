@@ -279,17 +279,17 @@ func TestNamesAreMergedAndAnEmptyOneRemoves(t *testing.T) {
 // repeated while it still matters, and is worse than useless once stale.
 func TestFormationOutlivesABacklogAndTheRestDoesNot(t *testing.T) {
 	for _, kind := range []schema.Kind{
-		schema.KindJoin, schema.KindCommit, KindRoster, KindResync, KindResyncReply,
+		schema.KindJoin, schema.KindCommit, KindRoster,
 	} {
-		if got := classOf(kind); got != wire.ClassForm {
-			t.Errorf("%s is sent as class %v, and formation has to outlive a backlog", kind, got)
+		if got := classOf(kind); got != wire.ClassDurable {
+			t.Errorf("%s is sent as class %v, and formation must survive history replay", kind, got)
 		}
 	}
 	for _, kind := range []schema.Kind{
 		KindFunded, KindBonded, KindPayout,
 	} {
-		if got := classOf(kind); got != wire.ClassState {
-			t.Errorf("%s is sent as class %v, and a stale one describes a table that has moved on",
+		if got := classOf(kind); got != wire.ClassDurable {
+			t.Errorf("%s is sent as class %v, and financial state must survive history replay",
 				kind, got)
 		}
 	}
