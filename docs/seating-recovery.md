@@ -1,6 +1,6 @@
 # Durable seating and payment recovery
 
-This SDK is under development. Poker and Battleships are design references,
+This SDK is under development. Earlier games are design references,
 not compatibility targets or evidence of production deployment.
 
 ## Runtime lifecycle
@@ -14,10 +14,12 @@ runtime was constructed but never started.
 
 Acceptance writes the invitation, group-chat ID and complete terms before
 acknowledging it or asking for an admission bond. Pending admissions can resume
-without a formation. A per-table bond must match the derived script and amount
-and reach the required confirmations before a join is published. A deadline
-that expires while approval or confirmation is pending leaves a recovery
-record, not a late join. Identical invite retries are idempotent; conflicting
+without a formation. An admission bond must match the derived script and amount before a join is
+published, but it is published unconfirmed on purpose: making depth an
+admission condition races a short registration window against the
+confirmations themselves. Depth is a later readiness condition, checked before
+the table is seated. A deadline that expires while approval or confirmation is
+pending leaves a recovery record, not a late join. Identical invite retries are idempotent; conflicting
 terms or chat IDs for the same session are refused.
 
 Storage errors latch a fault. Further financial operations stop. Repair storage
@@ -57,18 +59,17 @@ required stake/bond deposits, and their own readiness protocol before play.
 `reconnecting` and `stopped`. Subscription is reported only after `StreamStart`.
 Notifications coalesce and cannot block the bridge event loop.
 
-## Recovery transactions
+## Getting money back out
 
-The table store also implements `OperationStore`. Custom stores must provide
-that interface or configure a separate journal. Every SDK broadcast is preceded
-by a durable record of its exact signed bytes and transaction ID.
-`PreparedTransactions` exposes that journal. `RetryTransaction` rebroadcasts
-only the recorded transaction after checking its ID; journal presence alone
-does not mean it was mined.
+This runtime has no recovery API. It does not assemble, sign or broadcast a
+transaction, so there is no transaction journal here and nothing to rebroadcast.
+A `TableStore` implements `LoadTables`, `SaveTable` and `DropTable`, and that is
+the whole interface.
 
-`ReclaimSeatBond` refunds a matured per-table admission bond using the original
-terms and derived key, including a table that never formed. Existing stake,
-table-bond and forfeitable-bond recovery APIs remain separate.
+Money that was locked and never settled is recovered by its owner through
+dcrpulse, under Gaming then Recovery, once the timelock matures. That covers a
+stake at a table that never paid out and an admission bond at a table that never
+formed. The game has no part in it.
 
-No offline-consensus policy is inferred by this work. Accusation ladders are
-heads-up mechanisms; a multiplayer game must define and verify its own rules.
+The two deposit purposes are `seatbond` and `stake`. There is no table bond and
+no forfeitable bond; terms asking for one are refused.

@@ -15,8 +15,7 @@ that make equivocation self-punishing, the membership protocol that forms a
 roster and pins its terms, the tamper-evident game log, the message schema
 and its wire framing, and the gRPC proto plus transport a game uses to reach
 a dcrpulse gaming bridge. The referee, the cards and everything else that
-knows the rules of a particular game stays with that game -
-[dcrpoker](https://github.com/vctt94/dcrpoker) is the first consumer.
+knows the rules of a particular game stays with that game.
 
 Building a game on it? Start with
 **[docs/building-a-game.md](docs/building-a-game.md)** - what you write, what you
@@ -29,9 +28,9 @@ do not, and the one failure mode that costs money.
   a seating machine.
 - `pkg/spend` - the record of money in flight, and the state machine that keeps
   "could not ask" apart from "the answer was no".
-- `pkg/evidence` - both halves of an equivocation, retained, and the key they give up.
-- `pkg/punish` and `pkg/evidence` - carrying a forfeiture out: the bond ladder,
-  the sweep, the release and the equivocation store.
+- `pkg/evidence` - both halves of an equivocation, retained, and the key they
+  give up. Retaining it is all that happens here: this module carries no
+  forfeiture out.
 - `pkg/gaming/connect` - a game's connection to a bridge, headless.
 - `pkg/gaming/bridgetest` - a bridge that exists only in your process, with the
   failures a game has to survive.
@@ -41,7 +40,8 @@ do not, and the one failure mode that costs money.
   and position-derived nonces.
 - `pkg/membership` - how a table forms: invites, terms, roster and the match
   id both sides must agree on.
-- `pkg/gamelog` - the signed, hash-chained log a game is replayed from.
+- `pkg/gamelog` - a signed, hash-chained log a game may replay from. Offered to
+  games; `pkg/runtime` does not read or replay it.
 - `pkg/gaming/schema` - the message envelope, formation, invite, liveness and
   duty vocabulary shared by every game.
 - `pkg/gaming/wire` - how a message is framed for a Bison Relay group chat.
@@ -52,11 +52,14 @@ Package comments carry the reasoning, and they are long deliberately.
 
 ## Status
 
-Extracted verbatim from dcrpoker after the full money path ran on mainnet.
-The warts below are deliberate; every one is load-bearing under live coin.
+This SDK is under development. The full money path - bond, seat draw, stake,
+play, cooperative payout - runs end to end against two independent wallets and
+two bridges on simnet. The warts below are deliberate; every one is load-bearing
+under live coin.
 
-- The proto package is `dcrpulse.gaming.v1` and is frozen forever: it is
-  baked into all 11 gRPC `:path` values a live bridge routes on.
+- The proto package is `dcrpulse.gaming.v2` and its major is frozen: it is
+  baked into every gRPC `:path` a live bridge routes on, so a game and the
+  bridge it dials must share it.
 - The descriptor's recorded source path is the bare `gaming_bridge.proto`.
   No generator ships here and none may be added: dcrpulse is the generator
   of record, and any regen must keep `--proto_path` pointed at the gamingpb
@@ -69,20 +72,20 @@ The warts below are deliberate; every one is load-bearing under live coin.
   frozen hash inputs. They are never to be normalized, however inconsistent
   they look: changing one invalidates live bonds, punishment keys and
   signed logs.
-- `schema.Game` and `schema.Version` remain poker's values pending the
-  identity follow-up; a second game introduces itself through the transport
-  and schema configuration instead.
-- `schema.Duty` and `schema.DutyKind` are poker's vocabulary too - cardkey,
-  shuffle, share, action, checkpoint, reveal, indexed by hand - and so is half
-  of `forfeit.Domain`. Another game names its duties itself; `runtime.Lapsed`
-  carries an opaque label for exactly this reason.
+- A game introduces itself through the transport and schema configuration; it
+  does not edit the shared vocabulary to do it.
+- `schema.Duty` and `schema.DutyKind` carry a card game's vocabulary -
+  cardkey, shuffle, share, action, checkpoint, reveal, indexed by hand - and so
+  does half of `forfeit.Domain`. A game names its own duties; it cannot add a
+  `forfeit.Domain`, which is a closed allowlist of nine values.
 - `identity.Credentials` derives all three seat keys per session id, but
   `identity.BondDeposit` is one outpoint per identity. Pair them and the bond
-  key opens nothing. `pkg/runtime` derives the bond key with no session id, the
-  way dcrpoker does; a direct caller has to do the same.
+  key opens nothing. `pkg/runtime` derives the bond key with no session id, and
+  a direct caller has to do the same.
 - Nothing in the schema package, tests included, may import a game's
   driver: once a driver imports schema, that is an import cycle.
-- `escrow.MaxMembers = 6` is an escrow-script fact inherited by every game.
+- `escrow.MaxMembers = 13` is an escrow-script fact - the redeem-script push
+  limit, not a seat count anybody chose - inherited by every game.
 - `txscript/v4 v4.1.1` and `wire v1.7.0` are pinned in go.mod and checked
   in CI; the escrow scripts build on these exact versions and a bump
   changes bytes guarding live mainnet bonds.

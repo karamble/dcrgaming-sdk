@@ -73,8 +73,11 @@ type Game interface {
 // three-way are all outcomes a game may reach, and a runtime that only
 // understood "winner" would push every game into pretending.
 type Outcome struct {
-	// Shares is how much each seat is paid, in atoms, and must sum to what
-	// the table holds less the fee.
+	// Shares is how much each seat is paid, in atoms, and must sum to
+	// exactly what the table holds. These are gross: do not subtract a fee
+	// here. The bridge deducts the transaction fee downstream, pro-rata
+	// across the positive payments, and a caller that pre-subtracts it gets
+	// an outcome that does not add up and cannot settle.
 	Shares map[uint32]int64
 	// Void says the table is unwound rather than paid out: every seat takes
 	// its own stake back. A game reaching an outcome nobody won says so here

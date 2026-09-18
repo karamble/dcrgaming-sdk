@@ -16,32 +16,29 @@
 //
 // # What the game pushes back
 //
-// Five things flow the other way, and every one of them is a decision only the
-// game can make. Four are money, and none of them names a game:
+// Two things flow the other way, and both are decisions only the game can make:
 //
-//   - [Runtime.Settle], who is paid. The runtime does not know who won.
-//   - [Runtime.Seize], spend a branch of a seat's bond that seat's own key
-//     opened. The runtime is not told what the cheat was, and there is no kind
-//     of cheating for it to have heard of.
-//   - [Runtime.Accuse], open a chain against a seat that stopped answering.
-//     The game says what was owed, in its own words; the chain says whether it
-//     is late.
-//   - [Runtime.Release], hand this seat's own table bond back.
+//   - [Runtime.Settle], who is paid. The runtime does not know who won. An
+//     [Outcome] names shares, or unwinds the table with Void so each seat takes
+//     its own stake back.
+//   - [CoSigning], a refusal rather than an instruction: a game withholds its
+//     signature, which is the only answer some rulings have.
 //
-// The fifth is a refusal rather than an instruction: [CoSigning] lets a game
-// withhold its signature, which is the only answer some rulings have. Deciding
-// that somebody cheated is a rule and rules are the game's; what a runtime is
-// told is which money to move.
+// There is no forfeiture execution here, and no reclaim. A game's whole set of
+// levers over money is Settle, Outcome.Void and withholding. Locked money that
+// was never settled is recovered by its owner through dcrpulse, not through
+// this runtime.
 //
-// The four are methods on the runtime rather than on Rules, because they happen
+// Settle is a method on the runtime rather than on Rules, because it happens
 // when the game's rules say so and not when the runtime asks.
 //
 // # What the game reads
 //
 // A game watches its own duty clocks, which is a deliberate boundary: a
 // deadline passing is chain state, but *what was owed* is game logic and the SDK
-// has no vocabulary for it. So the runtime exposes the chain tip and the signed
-// log as a read surface and leaves the deciding alone.
+// has no vocabulary for it. So the runtime exposes the chain tip and leaves the
+// deciding alone. It does not keep the game's log: [pkg/gamelog] is a package a
+// game may use, not something this runtime reads or replays.
 package runtime
 
 import (
@@ -132,13 +129,27 @@ type TableState struct {
 }
 
 // Seated is an optional hook. A game that implements it is told when a table
-// has finished forming, which is when it may start play.
+// has finished forming: the roster and seat order are agreed.
+//
+// Forming is not funding. A seated table has no stake in escrow yet, so this is
+// not permission to start paid play - a game waits for every seat's stake to
+// read verified in [Runtime.Snapshot] before it treats a match as live.
+//
+// Not called again on restart. [Persisting.LoadTable] is, so a game that needs
+// to know it is seated after a restart reads that back rather than waiting for
+// this hook.
 type Seated interface {
 	Seated(ctx context.Context, match string, seats map[uint32][]byte)
 }
 
-// Settled is an optional hook. A game that implements it is told when a
-// settlement has been broadcast, which is when the money is decided.
+// Settled is an optional hook.
+//
+// It is never called. The only caller was removed when settlement moved to the
+// bridge, and nothing in this runtime calls it today. A game that gates its
+// end-of-match logic on this hook waits forever with money in escrow.
+//
+// To learn that a payout landed, poll [Runtime.RefreshDeposits] and watch this
+// seat's stake until its Check reads "spent".
 type Settled interface {
 	Settled(ctx context.Context, match string, txid string)
 }

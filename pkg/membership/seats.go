@@ -49,8 +49,8 @@ func BeaconHeight(t Terms) uint32 { return t.Until + BeaconDepth }
 
 // FundingBlocks is how long a seated table waits for every seat to be paid for.
 //
-// Admission closes at a height and seating is drawn two blocks later; this is
-// the window after that. It is a compromise between two costs that both land on
+// Admission closes at a height and seating is drawn at BeaconHeight, the next
+// block; this is the window after that. It is a compromise between two costs that both land on
 // the players who did pay. Too short and somebody who answered their host a
 // little slowly strands the table anyway. Too long and a seat that will never
 // be funded holds everyone else's money for the whole of it - and, until the
