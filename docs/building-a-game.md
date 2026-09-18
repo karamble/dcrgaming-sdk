@@ -23,6 +23,58 @@ That shape is the whole security model, and two consequences follow from it:
 - **Your game cannot be reached from outside.** It dials out; nothing dials in.
   No inbound port, no port forwarding, NAT is fine.
 
+## The shape of a table
+
+One table, end to end. Only the lines touching **Your game** are code you write;
+the rest happens without being asked.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant G as Your game
+    participant R as Runtime
+    participant B as dcrpulse bridge
+    participant C as Chain
+
+    B->>R: AcceptInvite(sid)
+    R->>G: Terms(sid)
+    G-->>R: membership.Terms, or an error to refuse
+    R->>B: FinancialAuthority(sid)
+    Note over R,B: the payout destination is fixed here, once
+    R->>B: RequestDepositSpend("seatbond")
+    B-->>R: a person approves
+    R->>C: admission bond
+    R->>R: publish the join, bond still unconfirmed
+
+    Note over C: admission closes at Terms.Until
+    C-->>R: block Until + 1 exists
+    R->>B: every bond's confirmations
+    R->>R: draw seats from that block's hash
+    R->>G: Seated(match, seats)
+
+    G->>R: Fund(match)
+    R->>B: RequestDepositSpend("stake")
+    B-->>R: a person approves
+    R->>C: stake
+    Note over G,R: Fund is blocked from here to here
+
+    loop every move
+        G->>R: Send(entry)
+        R->>G: Handle(peer entry)
+    end
+
+    G->>R: Settle(Outcome{Shares})
+    R->>G: WillCoSign(seat), for every seat
+    R->>B: ProposePayout
+    B-->>B: each operator approves, signatures exchanged
+    B->>C: payout, on the next reconcile pass
+    G->>R: RefreshDeposits until the stake reads "spent"
+```
+
+Two steps in there are the ones that catch people out. `Fund` does not return
+until the stake is on the chain or the request dies, and the payout reaches the
+chain on a reconcile pass rather than at the moment of approval.
+
 ## The four things you write
 
 ```go
