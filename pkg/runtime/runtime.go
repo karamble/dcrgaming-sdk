@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sync"
+	"time"
 
+	"github.com/decred/dcrd/chaincfg/v3"
 	"github.com/decred/dcrd/txscript/v4/stdaddr"
 	"github.com/decred/slog"
 
@@ -17,17 +20,6 @@ import (
 	"github.com/karamble/dcrgaming-sdk/pkg/spend"
 )
 
-// ErrNotYet marked a stage the runtime did not carry out yet.
-//
-// Nothing returns it: every stage of the lifecycle is built. It is kept only so
-// the two tests that assert *nothing* reports a stage as missing have something
-// to assert against, and so a stage added later has an obvious sentinel to
-// reach for.
-//
-// Do not branch on it in a game. A branch on this never fires, which is worse
-// than not having written it.
-var ErrNotYet = errors.New("this stage of the lifecycle is not built yet")
-
 // Config is everything the runtime needs to run a game.
 type Config struct {
 	// Rules is the game. Required.
@@ -35,24 +27,35 @@ type Config struct {
 	// Bridge is a dialled connection. Required. The runtime does not dial:
 	// how a game finds its bridge is connect's business and the game's.
 	Bridge *transport.Bridge
-	// Book is where money in flight is recorded. Required - a runtime with
-	// nowhere to write a request down is a runtime that can lose a payment.
+	// Dir is where the runtime keeps its own state: Dir/spends.json for
+	// money in flight and Dir/tables/ for tables between runs. Required
+	// unless both Book and Tables are supplied.
+	Dir string
+	// Book is where money in flight is recorded. Optional: taken from Dir
+	// when nil. A runtime with nowhere to write a request down is a runtime
+	// that can lose a payment, so one of the two has to be set.
 	Book *spend.Book
 	// Identity is the game's seed, from which every seat key is derived.
 	// Required.
 	Identity *identity.Identity
-	// Params is the chain the game is playing on. Required: every script
-	// and address is built against it.
+	// Params is the chain the game is playing on: every script and address
+	// is built against it. Optional - when nil it is taken from the network
+	// the bridge named in Hello. Set it only when the bridge has not said
+	// hello yet, which in practice means a test against a fake.
 	Params stdaddr.AddressParams
 	// SeatTags are the game's own domain-separation tags for those keys.
 	// Required, and the game's to state: they are frozen hash inputs that
 	// decide which keys a seat has, so the SDK must not invent them.
 	SeatTags identity.SeatTags
-	// Tables is where tables are kept between runs. Optional, and a game
-	// that leaves it out keeps its tables in memory only - which means a
-	// restart forgets every stake it has not yet settled and every bond it
-	// has not yet released.
+	// Tables is where tables are kept between runs. Optional: taken from Dir
+	// when nil. A runtime with neither keeps its tables in memory only,
+	// which means a restart forgets every stake it has not yet settled.
 	Tables TableStore
+	// TickEvery is how often [Runtime.Run] reads the chain tip and moves
+	// every table on. Zero is ten seconds. Negative means Run never reads it
+	// and the caller drives [Runtime.Tick] instead, which is what a test
+	// with its own idea of the height wants.
+	TickEvery time.Duration
 	// Log is optional.
 	Log slog.Logger
 }
@@ -85,17 +88,13 @@ type Runtime struct {
 	router   *transport.Router
 	log      slog.Logger
 
-	// sweepMu guards what this process has broadcast a spend of. Its own
-	// lock because it is consulted from the reclaim path while the table
-	// lock is not held.
-	sweepMu sync.Mutex
-
 	// runCtx is the context Run was given, so a message the router delivers
 	// carries the same lifetime as the loop that fetched it.
 	runCtx context.Context
 
 	// store is where tables are kept between runs. Optional.
-	store TableStore
+	store     TableStore
+	tickEvery time.Duration
 
 	mu     sync.Mutex
 	tables map[string]*table
@@ -145,8 +144,72 @@ type staked struct {
 	atoms    int64
 }
 
-// New builds a runtime. It does not start anything; call [Runtime.Run].
-func New(cfg Config) (*Runtime, error) {
+// ChainParams is the address parameters for a chain by the name the bridge uses
+// for it in Hello.
+//
+// An unrecognised name is an error rather than a default. A game that guessed
+// mainnet would build addresses that are unspendable on every other chain, and
+// it would not find out until somebody had paid into one.
+func ChainParams(network string) (stdaddr.AddressParams, error) {
+	switch network {
+	case "mainnet":
+		return chaincfg.MainNetParams(), nil
+	case "testnet3":
+		return chaincfg.TestNet3Params(), nil
+	case "simnet":
+		return chaincfg.SimNetParams(), nil
+	case "":
+		return nil, fmt.Errorf("the bridge has not said which chain it is on; call Hello first, or set Params")
+	default:
+		return nil, fmt.Errorf("unknown chain %q", network)
+	}
+}
+
+// Open builds a runtime and reads back every table it had written down.
+//
+// It is everything a game used to do around the constructor: it opens the
+// runtime's own stores under Dir, builds the runtime and resumes it. It does
+// not dial the bridge and it does not start the loop - call [Runtime.Run] when
+// the game is ready to receive, which for a game that installs its own routes
+// first is after it has.
+//
+// On any error it leaves nothing open.
+func Open(cfg Config) (*Runtime, error) {
+	if cfg.Book == nil {
+		if cfg.Dir == "" {
+			return nil, fmt.Errorf("a runtime needs a spend book, or a Dir to keep one in; money in flight has to be written down")
+		}
+		store, err := spend.FileStore(filepath.Join(cfg.Dir, "spends.json"))
+		if err != nil {
+			return nil, fmt.Errorf("open the spend book: %w", err)
+		}
+		book, err := spend.OpenBook(store)
+		if err != nil {
+			return nil, fmt.Errorf("read the spend book: %w", err)
+		}
+		cfg.Book = book
+	}
+	if cfg.Tables == nil && cfg.Dir != "" {
+		tables, err := NewFileTableStore(filepath.Join(cfg.Dir, "tables"))
+		if err != nil {
+			return nil, fmt.Errorf("open the table store: %w", err)
+		}
+		cfg.Tables = tables
+	}
+	r, err := newRuntime(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := r.ResumeWithReport(); err != nil {
+		r.Close()
+		return nil, err
+	}
+	return r, nil
+}
+
+// newRuntime builds a runtime. It does not start anything and it does not
+// resume: [Open] does both.
+func newRuntime(cfg Config) (*Runtime, error) {
 	if cfg.Rules == nil {
 		return nil, fmt.Errorf("a runtime needs a game to run")
 	}
@@ -160,7 +223,11 @@ func New(cfg Config) (*Runtime, error) {
 		return nil, fmt.Errorf("a runtime needs the game's identity to derive seat keys from")
 	}
 	if cfg.Params == nil {
-		return nil, fmt.Errorf("a runtime needs the chain it is playing on")
+		params, err := ChainParams(cfg.Bridge.Network())
+		if err != nil {
+			return nil, fmt.Errorf("a runtime needs the chain it is playing on: %w", err)
+		}
+		cfg.Params = params
 	}
 	if cfg.SeatTags.Session == "" || cfg.SeatTags.Log == "" || cfg.SeatTags.Bond == "" {
 		return nil, fmt.Errorf("a runtime needs the game's three seat-key tags; they are frozen inputs and the SDK must not invent them")
@@ -175,11 +242,12 @@ func New(cfg Config) (*Runtime, error) {
 	r := &Runtime{admissionWorkers: map[string]bool{}, faultCh: make(chan struct{}),
 		rules: cfg.Rules, bridge: cfg.Bridge, book: cfg.Book, log: log,
 		identity: cfg.Identity, seatTags: cfg.SeatTags, params: cfg.Params,
-		store:  cfg.Tables,
-		tables: map[string]*table{},
-		ended:  map[string]string{},
-		names:  map[string]string{},
-		runCtx: context.Background(),
+		store:     cfg.Tables,
+		tickEvery: cfg.TickEvery,
+		tables:    map[string]*table{},
+		ended:     map[string]string{},
+		names:     map[string]string{},
+		runCtx:    context.Background(),
 	}
 	// Built here rather than when Run starts, so a game that acts before the
 	// loop is up finds a router instead of a race.
@@ -335,6 +403,12 @@ func (r *Runtime) Run(ctx context.Context) error {
 		return fmt.Errorf("subscribe to the bridge: %w", err)
 	}
 
+	// The chain moves tables on, and nothing on the bridge stream says a
+	// block arrived, so the runtime reads the tip itself. A game used to
+	// have to do this, and a game that forgot never seated a table.
+	r.workers.Add(1)
+	go func() { defer r.workers.Done(); r.follow(ctx) }()
+
 	errs := make(chan error, 2)
 	var consumers sync.WaitGroup
 	consumers.Add(2)
@@ -449,6 +523,48 @@ func (r *Runtime) Names() map[string]string {
 // Book is the record of money in flight, for a game that wants to read it.
 // Reading is supported; writing to it behind the runtime's back is not.
 func (r *Runtime) Book() *spend.Book { return r.book }
+
+// Tables is where this runtime keeps its tables, for a game that reads them
+// directly. Nil when the runtime was given neither a store nor a Dir.
+func (r *Runtime) Tables() TableStore { return r.store }
+
+// defaultTickEvery is how often Run reads the chain tip when the game has not
+// said. Decred blocks average five minutes, so this is already generous.
+const defaultTickEvery = 10 * time.Second
+
+// tickBudget bounds one pass, so a bridge that stops answering cannot wedge the
+// follower.
+const tickBudget = 8 * time.Second
+
+// follow reads the chain tip and moves every table on.
+//
+// It ticks once before waiting, so a game restarted past a deadline closes
+// admission now rather than one interval from now.
+func (r *Runtime) follow(ctx context.Context) {
+	every := r.tickEvery
+	if every < 0 {
+		return
+	}
+	if every == 0 {
+		every = defaultTickEvery
+	}
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		call, done := context.WithTimeout(ctx, tickBudget)
+		if tip, err := r.bridge.ChainTip(call); err == nil {
+			r.Tick(call, tip.Height)
+		} else if ctx.Err() == nil {
+			r.log.Debugf("read the chain tip: %v", err)
+		}
+		done()
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
 
 func (t *table) formation() *membership.Formation {
 	t.formPtrMu.RLock()

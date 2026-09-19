@@ -49,7 +49,7 @@ func stand(t *testing.T, g Rules) (*bridgetest.Bridge, *Runtime, context.CancelF
 	if err != nil {
 		t.Fatalf("identity: %v", err)
 	}
-	rt, err := New(Config{
+	rt, err := Open(Config{
 		Rules: g, Bridge: conn, Book: book,
 		Identity: seed, SeatTags: testTags, Params: chaincfg.TestNet3Params(),
 	})
@@ -90,7 +90,7 @@ func TestARuntimeNeedsAGameABridgeAndSomewhereToWriteMoneyDown(t *testing.T) {
 		{"no seat tags", full(func(c *Config) { c.SeatTags = identity.SeatTags{} })},
 		{"half the seat tags", full(func(c *Config) { c.SeatTags.Bond = "" })},
 	} {
-		if _, err := New(tc.cfg); err == nil {
+		if _, err := Open(tc.cfg); err == nil {
 			t.Errorf("%s: built a runtime that could not derive a seat key", tc.name)
 		}
 	}
@@ -103,7 +103,7 @@ func TestARuntimeNeedsAGameABridgeAndSomewhereToWriteMoneyDown(t *testing.T) {
 		{"no spend book", full(func(c *Config) { c.Book = nil })},
 		{"a game that introduces nothing", full(func(c *Config) { c.Rules = &namelessGame{} })},
 	} {
-		if _, err := New(tc.cfg); err == nil {
+		if _, err := Open(tc.cfg); err == nil {
 			t.Errorf("%s: built a runtime that could not work", tc.name)
 		}
 	}
@@ -391,4 +391,66 @@ func TestEveryGameControlRequestUsesTheConsolesDeadline(t *testing.T) {
 			t.Errorf("%s: request ignored the console deadline", tc.name)
 		}
 	}
+}
+
+// The dashboard is the runtime's to fill. A game that says nothing about its
+// tables still gives an operator the chat, the buy-in and the deadline, because
+// the runtime knows them and the game would only be repeating itself.
+func TestTheRuntimeReportsATableWithoutTheGamesHelp(t *testing.T) {
+	_, rt, _ := stand(t, &silentGame{})
+	sid, err := accept(rt, invite(t, nil), testGCID)
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	st := rt.gameState(context.Background())
+	if len(st.GetTables()) != 1 {
+		t.Fatalf("reported %d tables", len(st.GetTables()))
+	}
+	row := st.GetTables()[0]
+	if row.GetSid() != sid {
+		t.Errorf("reported table %q, not %q", row.GetSid(), sid)
+	}
+	if row.GetGcid() != testGCID {
+		t.Errorf("reported chat %q, not %q", row.GetGcid(), testGCID)
+	}
+	if row.GetState() == "" {
+		t.Error("reported no phase")
+	}
+	if row.GetSeats() == 0 || row.GetBuyinAtoms() == 0 || row.GetUntil() == 0 {
+		t.Errorf("terms missing: seats %d, buy-in %d, until %d",
+			row.GetSeats(), row.GetBuyinAtoms(), row.GetUntil())
+	}
+}
+
+// silentGame implements Rules and nothing else, which is the whole point.
+type silentGame struct{ battleshipsRules }
+
+// A game that does implement Reporting replaces the status line, and only that.
+func TestAGameCanReplaceTheStatusLine(t *testing.T) {
+	g := &talkativeGame{}
+	_, rt, _ := stand(t, g)
+	sid, err := accept(rt, invite(t, nil), testGCID)
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	g.match = sid
+	st := rt.gameState(context.Background())
+	if len(st.GetTables()) != 1 {
+		t.Fatalf("reported %d tables", len(st.GetTables()))
+	}
+	if got := st.GetTables()[0].GetState(); got != "waiting for a shot" {
+		t.Errorf("status line is %q; the game's was not used", got)
+	}
+	if st.GetTables()[0].GetGcid() != testGCID {
+		t.Error("the runtime's own fields were lost when the game spoke")
+	}
+}
+
+type talkativeGame struct {
+	battleshipsRules
+	match string
+}
+
+func (g *talkativeGame) State(context.Context) State {
+	return State{Tables: []TableState{{Match: g.match, Status: "waiting for a shot"}}}
 }

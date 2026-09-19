@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -152,11 +153,42 @@ func (r *Runtime) gameState(ctx context.Context) (st *gamingpb.GameState) {
 		}
 	}()
 
-	gs := r.rules.State(ctx)
-	for _, t := range gs.Tables {
-		st.Tables = append(st.Tables, &gamingpb.Table{
-			Sid: t.Match, State: t.Status, Seats: t.Seats,
-		})
+	// The runtime knows the table, the chat, the buy-in, the deadline and
+	// whether it is over, so it fills those itself. A game only decides the
+	// status line, and only if it wants to.
+	r.mu.Lock()
+	matches := make([]string, 0, len(r.tables))
+	for match := range r.tables {
+		matches = append(matches, match)
+	}
+	r.mu.Unlock()
+	sort.Strings(matches)
+
+	rows := make(map[string]*gamingpb.Table, len(matches))
+	for _, match := range matches {
+		snap, err := r.Snapshot(match)
+		if err != nil {
+			continue
+		}
+		row := &gamingpb.Table{
+			Sid:        match,
+			Gcid:       snap.Record.GCID,
+			State:      snap.Phase,
+			Seats:      snap.Record.Terms.Seats,
+			BuyinAtoms: int64(snap.Record.Terms.BuyInAtoms),
+			Until:      snap.Record.Terms.Until,
+			Over:       snap.Record.RecoveryOnly || snap.Record.Aborted,
+		}
+		rows[match] = row
+		st.Tables = append(st.Tables, row)
+	}
+
+	if hook, ok := r.rules.(Reporting); ok {
+		for _, t := range hook.State(ctx).Tables {
+			if row, ok := rows[t.Match]; ok && t.Status != "" {
+				row.State = t.Status
+			}
+		}
 	}
 	return st
 }

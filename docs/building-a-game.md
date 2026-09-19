@@ -75,14 +75,13 @@ Two steps in there are the ones that catch people out. `Fund` does not return
 until the stake is on the chain or the request dies, and the payout reaches the
 chain on a reconcile pass rather than at the moment of approval.
 
-## The four things you write
+## The three things you write
 
 ```go
 type Rules interface {
 	Identity() connect.Identity
 	Terms(sid string) (membership.Terms, error)
 	Handle(ctx context.Context, in Message) error
-	State(ctx context.Context) State
 }
 ```
 
@@ -99,19 +98,18 @@ body is whatever you put there and the runtime has not looked inside. Errors are
 logged and the message dropped, deliberately: a runtime that retried on your
 behalf would replay moves.
 
-**`State`** - one line and a table list, for the operator's dashboard. Called
-from the bridge's request loop, so do not block on your own locks and do not
-call back into the runtime.
-
-Two optional hooks exist, and only one of them works. `Seated` tells you a table
-has finished forming. **`Settled` is never called** — the only caller was
-removed when settlement moved to the bridge. A game that waits for it waits
-forever with money in escrow; to learn that a payout landed, poll
-`RefreshDeposits` until this seat's stake reads `Check == "spent"`.
+Three optional hooks. `Seated` says a table has finished forming. `CoSigning`
+lets you refuse a payout. `Reporting` replaces the dashboard's status line for a
+table; implement it only if the runtime's own - the table's lifecycle phase -
+is not what you want an operator to read. The runtime fills the rest of the
+dashboard itself.
 
 `Seated` is not re-fired on restart, and forming is not funding: a seated table
 has no stake in escrow yet. Wait for every seat's stake to read `verified`
 before you treat a match as live.
+
+**There is no hook for a payout landing.** Poll `RefreshDeposits` until this
+seat's stake reads `Check == "spent"`; that is the only signal there is.
 
 ## The two things you tell the runtime
 
@@ -292,6 +290,43 @@ the error you get back does not distinguish these. Check them in this order.
 None of it is yours to configure, but the symptom reaches your game as a
 refusal, so check it before looking for the fault in your own code.
 
+## Wiring it up
+
+Three methods above, and this below. There is nothing else.
+
+```go
+rt, err := runtime.Open(runtime.Config{
+	Rules:    game,
+	Bridge:   bridge,           // dialled, and it has said hello
+	Identity: seed,
+	Dir:      dir,              // the runtime keeps its own records here
+	SeatTags: identity.SeatTags{ // yours, frozen once chosen
+		Session: "MyGame/session/v1",
+		Log:     "MyGame/log/v1",
+		Bond:    "MyGame/bond/v1",
+	},
+})
+if err != nil {
+	return err
+}
+defer rt.Close()
+
+go rt.Run(ctx)
+```
+
+`Open` opens the spend book and the table store under `Dir`, builds the runtime
+and reads back every table it had written down. The chain comes from the network
+the bridge named in Hello, so there is no parameter to pass and no switch to
+write; pass `Params` only when the bridge has not said hello, which in practice
+means a test against a fake.
+
+`Run` reads the chain tip on its own and moves every table on, so there is no
+tick loop to write. A game with its own block feed sets `TickEvery: -1` and calls
+`Tick` itself.
+
+`Open` does not start `Run`, because a game that installs its own routes has to
+do that first: Bison Relay replays history the moment you subscribe.
+
 ## Testing without a bridge
 
 `pkg/gaming/bridgetest` is a bridge that only exists in your process. It speaks
@@ -362,7 +397,7 @@ been proven.
 ## Compatibility
 
 The module is pre-1.0 and the runtime packages are new. Treat `pkg/runtime`,
-`pkg/spend`, `pkg/evidence`, `pkg/gaming/connect` and `pkg/gaming/bridgetest` as
+`pkg/spend`, `pkg/gaming/connect` and `pkg/gaming/bridgetest` as
 unstable until this section says otherwise.
 
 The older packages - `escrow`, `forfeit`, `membership`, `gamelog`,

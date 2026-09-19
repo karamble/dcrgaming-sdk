@@ -272,28 +272,6 @@ func (r *Runtime) findOutput(ctx context.Context, rec spend.Record) (staked, err
 		"the money moved but not to this table", rec.Purpose, rec.TxID)
 }
 
-// SetPayoutFor records where a seat asked to be paid, which every seat
-// announces because it goes into the settlement they all sign.
-func (r *Runtime) SetPayoutFor(match string, seat uint32, payScript []byte) error {
-	if len(payScript) == 0 {
-		return fmt.Errorf("seat %d named no payout script", seat)
-	}
-	r.mu.Lock()
-	t, ok := r.tables[match]
-	if !ok {
-		r.mu.Unlock()
-		return fmt.Errorf("no table %q", match)
-	}
-	if t.payouts == nil {
-		t.payouts = map[uint32][]byte{}
-	}
-	t.payouts[seat] = append([]byte(nil), payScript...)
-	r.mu.Unlock()
-	// Every seat announces this once and it goes into the settlement they
-	// all sign, so a restart that lost it cannot settle the table.
-	return r.keep(t)
-}
-
 // Funded reports where a seat's stake landed, if it has.
 func (r *Runtime) Funded(match string, seat uint32) (outpoint string, atoms int64, ok bool) {
 	r.mu.Lock()

@@ -213,16 +213,6 @@ func (r *Runtime) write(t *table, rec TableRecord) error {
 	return nil
 }
 
-// forget drops a table from the store, for one that is over.
-func (r *Runtime) forget(match string) {
-	if r.store == nil {
-		return
-	}
-	if err := r.store.DropTable(match); err != nil {
-		r.log.Errorf("table %s: could not forget it: %v", match, err)
-	}
-}
-
 // Resume takes back up every table that was written down.
 //
 // Called before Run. A table that will not resume is reported and skipped

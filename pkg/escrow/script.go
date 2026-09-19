@@ -169,12 +169,3 @@ func checkPubKey(key []byte) error {
 	}
 	return nil
 }
-
-func containsKey(keys [][]byte, want []byte) bool {
-	for _, k := range keys {
-		if bytes.Equal(k, want) {
-			return true
-		}
-	}
-	return false
-}

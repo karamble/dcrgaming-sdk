@@ -2,7 +2,6 @@ package runtime
 
 import (
 	"context"
-	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -83,9 +82,6 @@ func TestASeatWithNoStakeOnChainCannotBeSettled(t *testing.T) {
 	err = rt.Settle(context.Background(), sid, Outcome{Void: true})
 	if err == nil {
 		t.Fatal("settled a table nobody had funded")
-	}
-	if errors.Is(err, ErrNotYet) {
-		t.Fatalf("an unfunded table reported settlement as unbuilt: %v", err)
 	}
 }
 

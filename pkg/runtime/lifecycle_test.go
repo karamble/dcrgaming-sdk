@@ -44,7 +44,7 @@ func TestPendingAdmissionRestores(t *testing.T) {
 	if !rt.HoldsOurs(sid) {
 		t.Fatal("pending obligation can be dropped")
 	}
-	again, err := New(Config{Rules: rt.rules, Bridge: rt.bridge, Book: rt.book, Identity: rt.identity, Params: rt.params, Tables: rt.store, SeatTags: rt.seatTags})
+	again, err := Open(Config{Rules: rt.rules, Bridge: rt.bridge, Book: rt.book, Identity: rt.identity, Params: rt.params, Tables: rt.store, SeatTags: rt.seatTags})
 	if err != nil {
 		t.Fatal(err)
 	}

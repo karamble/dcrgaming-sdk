@@ -83,12 +83,15 @@ type Rules interface {
 	// a game that wants a message redelivered has to ask for it, because a
 	// runtime that retried on the game's behalf would replay moves.
 	Handle(ctx context.Context, in Message) error
+}
 
-	// State is what the dashboard shows an operator, answered on demand when
-	// the bridge asks.
-	//
-	// Called from the bridge's request loop, so it must not block on the
-	// game's own locks for long and must not call back into the runtime.
+// Reporting is an optional hook. A game that implements it decides the status
+// line the dashboard shows for each of its tables; a game that does not gets
+// the runtime's own, which is the table's lifecycle phase.
+//
+// Called from the bridge's request loop, so it must not block on the game's own
+// locks for long and must not call back into the runtime.
+type Reporting interface {
 	State(ctx context.Context) State
 }
 
@@ -140,18 +143,6 @@ type TableState struct {
 // this hook.
 type Seated interface {
 	Seated(ctx context.Context, match string, seats map[uint32][]byte)
-}
-
-// Settled is an optional hook.
-//
-// It is never called. The only caller was removed when settlement moved to the
-// bridge, and nothing in this runtime calls it today. A game that gates its
-// end-of-match logic on this hook waits forever with money in escrow.
-//
-// To learn that a payout landed, poll [Runtime.RefreshDeposits] and watch this
-// seat's stake until its Check reads "spent".
-type Settled interface {
-	Settled(ctx context.Context, match string, txid string)
 }
 
 // CoSigning is an optional hook. A game that implements it is asked before this

@@ -34,6 +34,12 @@ func waitFor(t *testing.T, what string, want func() bool) {
 }
 
 func wireSeat(t *testing.T, ctx context.Context, srv *bridgetest.Server, seat string, rules Rules) *Runtime {
+	return wireSeatEvery(t, ctx, srv, seat, rules, -1)
+}
+
+// wireSeatEvery is wireSeat with the runtime's own chain poll set. A negative
+// interval turns it off, which is what a test that drives Tick itself wants.
+func wireSeatEvery(t *testing.T, ctx context.Context, srv *bridgetest.Server, seat string, rules Rules, every time.Duration) *Runtime {
 	t.Helper()
 	conn, err := srv.Dial(ctx, seat, func(cfg *transport.BridgeConfig) {
 		connect.Stamp(cfg, rules.Identity())
@@ -49,9 +55,10 @@ func wireSeat(t *testing.T, ctx context.Context, srv *bridgetest.Server, seat st
 	if err != nil {
 		t.Fatalf("identity: %v", err)
 	}
-	rt, err := New(Config{
+	rt, err := Open(Config{
 		Rules: rules, Bridge: conn, Book: book, Tables: NewMemTableStore(),
 		Identity: seed, SeatTags: testTags, Params: chaincfg.TestNet3Params(),
+		TickEvery: every,
 	})
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
@@ -346,4 +353,46 @@ func TestAGameIsHandedItsLogKeyAndNoFinancialKey(t *testing.T) {
 	if hex.EncodeToString(logs[mine]) != hex.EncodeToString(logKey.PubKey().SerializeCompressed()) {
 		t.Fatal("this seat's log key differs from the roster")
 	}
+}
+
+// A game that never calls Tick still gets a seated table: Run reads the chain
+// tip itself. This is the whole reason the poll moved into the runtime, and
+// without it a game that forgot to tick would sit at an agreed roster forever.
+func TestRunSeatsATableWithoutTheGameTicking(t *testing.T) {
+	fake := bridgetest.New(bridgetest.Options{
+		Game: "battleships", Network: "mainnet",
+		Params: chaincfg.TestNet3Params(), Height: 700,
+	})
+	srv, err := fake.Serve("seat0", "seat1")
+	if err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	t.Cleanup(srv.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	const every = 20 * time.Millisecond
+	one := wireSeatEvery(t, ctx, srv, "seat0", &trivialGame{}, every)
+	two := wireSeatEvery(t, ctx, srv, "seat1", &trivialGame{}, every)
+	go func() { _ = one.Run(ctx) }()
+	go func() { _ = two.Run(ctx) }()
+	waitFor(t, "both seats to subscribe", func() bool { return fake.Subscribers() == 2 })
+
+	link := invite(t, nil)
+	sid, err := accept(one, link, testGCID)
+	if err != nil {
+		t.Fatalf("first seat accepting: %v", err)
+	}
+	if _, err = accept(two, link, testGCID); err != nil {
+		t.Fatalf("second seat accepting: %v", err)
+	}
+
+	// Blocks keep arriving, as they would on a real chain, and the bonds need
+	// a few of them to confirm. Nothing here calls Tick: that is the point.
+	waitFor(t, "both peers to seat without a tick from the game", func() bool {
+		fake.Mine(1)
+		_, a := one.Seats(sid)
+		_, b := two.Seats(sid)
+		return a && b
+	})
 }

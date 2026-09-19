@@ -65,25 +65,6 @@ func (r *Runtime) Settle(ctx context.Context, match string, out Outcome) error {
 	return r.keep(t)
 }
 
-func (r *Runtime) proposeSettlement(ctx context.Context, t *table) error {
-	r.mu.Lock()
-	id := t.payoutID
-	r.mu.Unlock()
-	if id == "" {
-		return nil
-	}
-	status, err := r.bridge.PayoutStatus(ctx, id)
-	if err != nil {
-		return err
-	}
-	if status.GetState() == "confirmed" {
-		if hook, ok := r.rules.(Settled); ok {
-			hook.Settled(ctx, t.match, status.GetTxid())
-		}
-	}
-	return nil
-}
-
 // seatOrder is the order a settlement's inputs and outputs are built in.
 //
 // Ascending by seat, and it has to be: the order decides the transaction's
@@ -161,13 +142,4 @@ func outpointOf(s string) (wire.OutPoint, error) {
 		return wire.OutPoint{}, fmt.Errorf("outpoint txid: %w", err)
 	}
 	return wire.OutPoint{Hash: *h, Index: vout, Tree: wire.TxTreeRegular}, nil
-}
-
-func seatedKey(seats map[uint32][]byte, key []byte) bool {
-	for _, candidate := range seats {
-		if string(candidate) == string(key) {
-			return true
-		}
-	}
-	return false
 }

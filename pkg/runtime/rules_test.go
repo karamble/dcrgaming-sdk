@@ -86,15 +86,15 @@ func (b *battleshipsRules) State(context.Context) State {
 // battleships also takes the optional hooks; poker deliberately does not, which
 // is what makes them optional rather than part of Rules.
 func (b *battleshipsRules) Seated(context.Context, string, map[uint32][]byte) {}
-func (b *battleshipsRules) Settled(context.Context, string, string)           {}
+func (b *battleshipsRules) WillCoSign(string, uint32) bool                    { return true }
 
 // The spike's decision rule, as a compile-time fact: both games satisfy the
 // same interface, and neither needs a method the other does not.
 var (
-	_ Rules   = (*pokerRules)(nil)
-	_ Rules   = (*battleshipsRules)(nil)
-	_ Seated  = (*battleshipsRules)(nil)
-	_ Settled = (*battleshipsRules)(nil)
+	_ Rules     = (*pokerRules)(nil)
+	_ Rules     = (*battleshipsRules)(nil)
+	_ Seated    = (*battleshipsRules)(nil)
+	_ CoSigning = (*battleshipsRules)(nil)
 )
 
 // Terms differ sharply between the two games - poker states no bond and a
@@ -164,12 +164,16 @@ func TestEachGameIntroducesItself(t *testing.T) {
 	}
 }
 
-// A game with no tables still has to answer the dashboard, because the bridge
-// asks whether or not the game feels ready.
-func TestStateIsAnsweredEvenWithNothingHappening(t *testing.T) {
+// Reporting is optional, so a game that implements it must still be a Rules and
+// the runtime must not need it to answer the dashboard.
+func TestReportingIsOptional(t *testing.T) {
 	for _, r := range []Rules{&pokerRules{}, &battleshipsRules{}} {
-		if got := r.State(context.Background()); got.Summary == "" {
-			t.Errorf("%s answered the dashboard with nothing", r.Identity().GameID)
+		hook, ok := r.(Reporting)
+		if !ok {
+			continue
+		}
+		if got := hook.State(context.Background()); got.Summary == "" {
+			t.Errorf("%s implements Reporting and answered with nothing", r.Identity().GameID)
 		}
 	}
 }

@@ -1,5 +1,9 @@
 package runtime
 
+// Small lookups shared by the seating, announce and settlement paths: which
+// seat is ours at a table, how an outpoint splits, and how a destination
+// address becomes a payment script.
+
 import (
 	"fmt"
 	"github.com/decred/dcrd/txscript/v4/stdaddr"

@@ -5,12 +5,12 @@ not compatibility targets or evidence of production deployment.
 
 ## Runtime lifecycle
 
-Use `spend.FileStore` and `runtime.NewFileTableStore` for persisted state.
-`runtime.New` acquires exclusive ownership of these file-backed stores; another
-runtime using either store is refused. Call `ResumeWithReport` before `Run`,
-inspect failed records, then run the event loop and call `Tick` as chain heights
-advance. Cancel and await `Run` before reopening stores. Use `Close` if the
-runtime was constructed but never started.
+`runtime.Open` keeps both stores under its `Dir` and acquires exclusive
+ownership of them; another runtime on the same directory is refused. It resumes
+as it opens, so a caller inspects `Resumed()` for failed records and then starts
+the event loop with `Run`, which follows the chain on its own. Cancel and await
+`Run` before reopening the stores. Use `Close` if the runtime was opened but
+never started.
 
 Acceptance writes the invitation, group-chat ID and complete terms before
 acknowledging it or asking for an admission bond. Pending admissions can resume

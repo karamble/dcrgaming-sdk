@@ -24,13 +24,10 @@ do not, and the one failure mode that costs money.
 ## Reading it
 
 - `pkg/runtime` - the lifecycle a game plugs into. It owns the loop; a game
-  implements four methods and never writes a bridge dispatcher, a spend book or
-  a seating machine.
+  implements three methods and never writes a bridge dispatcher, a spend book, a
+  seating machine or a chain follower.
 - `pkg/spend` - the record of money in flight, and the state machine that keeps
   "could not ask" apart from "the answer was no".
-- `pkg/evidence` - both halves of an equivocation, retained, and the key they
-  give up. Retaining it is all that happens here: this module carries no
-  forfeiture out.
 - `pkg/gaming/connect` - a game's connection to a bridge, headless.
 - `pkg/gaming/bridgetest` - a bridge that exists only in your process, with the
   failures a game has to survive.

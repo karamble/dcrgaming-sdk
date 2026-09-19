@@ -112,6 +112,12 @@ type ResumeReport struct {
 	Failed                 map[string]string
 }
 
+// Resumed is what the last resume found on disk, for a caller of [Open] that
+// wants to see it without resuming again.
+func (r *Runtime) Resumed() ResumeReport {
+	return ResumeReport{Restored: append([]string(nil), r.resumeReport.Restored...), RecoveryOnly: append([]string(nil), r.resumeReport.RecoveryOnly...), Failed: cloneStrings(r.resumeReport.Failed)}
+}
+
 func (r *Runtime) ResumeWithReport() (ResumeReport, error) {
 	err := r.Resume()
 	report := ResumeReport{Restored: append([]string(nil), r.resumeReport.Restored...), RecoveryOnly: append([]string(nil), r.resumeReport.RecoveryOnly...), Failed: cloneStrings(r.resumeReport.Failed)}

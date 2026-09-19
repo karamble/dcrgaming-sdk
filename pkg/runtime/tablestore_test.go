@@ -48,7 +48,7 @@ func standAt(t *testing.T, g Rules, seedDir string, store TableStore) (*bridgete
 	if err != nil {
 		t.Fatalf("identity: %v", err)
 	}
-	rt, err := New(Config{
+	rt, err := Open(Config{
 		Rules: g, Bridge: conn, Book: book, Tables: store,
 		Identity: seed, SeatTags: testTags, Params: chaincfg.TestNet3Params(),
 	})

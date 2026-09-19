@@ -53,7 +53,7 @@ func standPerTable(t *testing.T) (*bridgetest.Bridge, *Runtime) {
 	if err != nil {
 		t.Fatalf("identity: %v", err)
 	}
-	rt, err := New(Config{
+	rt, err := Open(Config{
 		Rules: g, Bridge: conn, Book: book, Tables: NewMemTableStore(),
 		Identity: seed, SeatTags: testTags, Params: chaincfg.TestNet3Params(),
 	})
