@@ -86,6 +86,12 @@ const BondingBlocks uint32 = 8
 // out at all: fully funded so the funding deadline never fires, not fully bonded
 // so the table never deals. It sits alive forever while the stakes it holds can
 // only be recovered by each member waiting out their own refund timelock.
+//
+// Nothing calls it, deliberately. The state it covers needs a per-table bond
+// on top of the stake, and the runtime refuses terms that carry one
+// (runtime.termsFor). Wiring a deadline for a state that cannot be reached
+// would only be a branch nothing tests. It stays for the model that brings
+// table bonds back.
 func BondingDeadline(t Terms) uint32 { return FundingDeadline(t) + BondingBlocks }
 
 // SeatOrder draws the seating for a membership.

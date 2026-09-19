@@ -607,15 +607,19 @@ func (f *Formation) recompute() {
 // script is derived from the membership. Forgetting it would be forgetting
 // where their money is.
 //
-// Committed is kept for the same reason one step earlier: the commit is this
-// key's irrevocable word on a roster, and a table stuck there - bound, with
-// somebody else's commitment never arriving - must end without unsaying it.
-// No money can have moved at Committed: funding needs a seating, and seating
-// needs the table settled. Anything before Committed has its own way of
-// ending, and anything after Settled has money moving under rules this does
-// not know.
+// Formed and Committed are kept for the same reason one step earlier. The
+// commit is this key's irrevocable word on a roster, and a table stuck there -
+// bound, with somebody else's commitment never arriving - must end without
+// unsaying it. Formed is included because that is where money starts being at
+// risk: the beacon is set as soon as every member agrees the membership, not
+// when the commit round finishes, so a table can be seated and funded while
+// still Formed. Anything before Formed has no canonical membership to keep and
+// its own way of ending, and anything after Settled has money moving under
+// rules this does not know.
 func (f *Formation) lockedAbandon(reason string) {
-	if f.state != Settled && f.state != Committed {
+	switch f.state {
+	case Formed, Committed, Settled:
+	default:
 		return
 	}
 	f.state = Aborted

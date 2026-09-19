@@ -313,4 +313,57 @@ func (r *Runtime) tickTable(ctx context.Context, t *table, height int64) {
 	if err := r.seatIfReady(ctx, t.match); err != nil {
 		r.log.Debugf("table %s: not seated yet: %v", t.match, err)
 	}
+	r.lapseIfUnfunded(t, height)
+}
+
+// lapseIfUnfunded gives up on a seated table whose funding window ran out.
+//
+// Seats are drawn one block after admission closes, and every seat then has
+// membership.FundingBlocks to pay its stake. A seat that never pays holds the
+// seats that did pay to a table that can never be dealt, so past the deadline
+// the runtime stops calling it a game: recovery-only, with the formation
+// abandoned under a reason naming the shortfall.
+//
+// This does not move anyone's money, and must not be read as doing so. Every
+// settlement spends every seat's stake, so a one-sided Void cannot be signed;
+// the seats that did pay still wait out their own refund timelock. What
+// changes is that they are told at a height both sides compute the same way,
+// instead of reading "waiting" until somebody thinks to look.
+func (r *Runtime) lapseIfUnfunded(t *table, height int64) {
+	terms := t.formation().Terms()
+	if terms.Until == 0 || height <= int64(membership.FundingDeadline(terms)) {
+		return
+	}
+	seats, seated := t.formation().Seats()
+	if !seated {
+		// Never seated, so admission expired rather than funding; that has
+		// its own deadline, and its own recovery reason.
+		return
+	}
+	r.mu.Lock()
+	paid := 0
+	for seat := range seats {
+		if t.funded[seat].outpoint != "" {
+			paid++
+		}
+	}
+	lapsed := paid < len(seats) && !t.recoveryOnly
+	if lapsed {
+		t.recoveryOnly = true
+		t.recoveryReason = fmt.Sprintf("funding expired with %d of %d stakes paid", paid, len(seats))
+	}
+	reason := t.recoveryReason
+	r.mu.Unlock()
+	if !lapsed {
+		return
+	}
+	// Both, not either. recoveryOnly is what flips Snapshot.Phase to
+	// "recovery" and stops the ticks, sends and spend requests in this
+	// process; Abandon records the same end in the formation, and keeps the
+	// membership so every seat's refund script is still derivable.
+	t.formation().Abandon(reason)
+	if err := r.keep(t); err != nil {
+		r.log.Errorf("table %s: retaining the lapsed table: %v", t.match, err)
+	}
+	r.log.Infof("table %s: %s", t.match, reason)
 }

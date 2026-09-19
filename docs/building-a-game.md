@@ -57,6 +57,7 @@ sequenceDiagram
     B-->>R: a person approves
     R->>C: stake
     Note over G,R: Fund is blocked from here to here
+    Note over C: every stake is due by Until + 17,<br/>or the table goes to recovery
 
     loop every move
         G->>R: Send(entry)
@@ -247,6 +248,25 @@ Admission bonds are announced *unconfirmed*, deliberately: making confirmation
 an admission condition would race a short registration window against the
 confirmations themselves. Depth is checked later, as a readiness condition,
 before the table is seated.
+
+## When a seat never pays
+
+A seated table has `membership.FundingBlocks` (16, roughly eighty minutes) for
+every seat's stake to arrive. Past `membership.FundingDeadline(terms)` —
+`Terms.Until + 17` — a table that is still short is given up on: the runtime
+marks it recovery-only and abandons the formation, and `Snapshot.Phase` becomes
+`"recovery"` with `Record.Reason` naming how many stakes arrived.
+
+This does not move any money, and a game must not tell its player otherwise.
+Every settlement spends every seat's stake, so a payout returning only the
+stakes that were paid cannot be signed — the absent seat's signature does not
+exist. A seat that did pay gets its stake back through its own refund timelock
+in dcrpulse, after `Terms.CSVBlocks`. What the deadline buys is being told, at a
+height both sides compute identically, instead of a table that reads "waiting"
+for good.
+
+Render it the way you render any recovery-only table. Both reference games show
+`Record.Reason`, falling back to `Record.RecoveryReason`.
 
 ## Surviving a restart
 

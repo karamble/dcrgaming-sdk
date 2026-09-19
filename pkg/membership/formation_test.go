@@ -1020,57 +1020,61 @@ func TestTheDrawingBlockIsPastTheDeadline(t *testing.T) {
 	}
 }
 
-// Abandoning is for a table this key already bound itself to - Committed or
-// Settled - and for nothing earlier. At Committed the membership must survive
-// the abort exactly as it does at Settled: the commit was this key's
-// irrevocable word, and no money can have moved yet because funding needs a
-// seating, which needs the table settled.
-func TestAbandonEndsACommittedTableAndKeepsItsWord(t *testing.T) {
+// Abandoning is for a table that has a membership to keep - Formed, Committed
+// or Settled - and for nothing earlier. Formed counts because that is where
+// money starts being at risk: the beacon is set once every member agrees the
+// membership, so a seated, funded table can still be Formed. In every case the
+// canonical membership must survive the abort, because that is where each
+// seat's refund script comes from.
+func TestAbandonEndsATableWithAMembershipAndKeepsItsWord(t *testing.T) {
 	terms := testTerms(2)
 	privs := players(t, 2)
 	all := joinsFor(t, terms, privs)
 
-	f, err := NewFormation(terms, testCreds(t, privs[0]))
-	if err != nil {
-		t.Fatalf("new formation: %v", err)
+	formation := func(t *testing.T) *Formation {
+		t.Helper()
+		f, err := NewFormation(terms, testCreds(t, privs[0]))
+		if err != nil {
+			t.Fatalf("new formation: %v", err)
+		}
+		return f
 	}
 
-	// Joining: nothing to give up on yet.
+	// Joining: no membership, nothing to give up on.
+	f := formation(t)
 	f.Abandon("too early")
 	if f.State() != Joining {
 		t.Fatalf("abandoning a joining table left it %v", f.State())
 	}
-	for _, j := range all {
-		if err := f.AddJoin(j); err != nil {
-			t.Fatalf("add join: %v", err)
+
+	for _, state := range []State{Formed, Committed} {
+		f := formation(t)
+		for _, j := range all {
+			if err := f.AddJoin(j); err != nil {
+				t.Fatalf("add join: %v", err)
+			}
 		}
-	}
+		if state == Committed {
+			if _, err := f.Bind(); err != nil {
+				t.Fatalf("bind: %v", err)
+			}
+		}
+		if f.State() != state {
+			t.Fatalf("state is %v, wanted %v", f.State(), state)
+		}
+		if f.canonical == nil {
+			t.Fatalf("no canonical membership at %v", state)
+		}
 
-	// Formed: still nothing bound, still not abandonable.
-	f.Abandon("still too early")
-	if f.State() != Formed {
-		t.Fatalf("abandoning a formed table left it %v", f.State())
-	}
-
-	if _, err := f.Bind(); err != nil {
-		t.Fatalf("bind: %v", err)
-	}
-	if f.State() != Committed {
-		t.Fatalf("state is %v after binding alone", f.State())
-	}
-	canonical := f.canonical
-	if canonical == nil {
-		t.Fatal("no canonical membership at committed")
-	}
-
-	f.Abandon("the other commitments never arrived")
-	if f.State() != Aborted {
-		t.Fatalf("a committed table would not abandon: %v", f.State())
-	}
-	if f.Reason() == "" {
-		t.Fatal("abandoned with no reason recorded")
-	}
-	if f.canonical == nil {
-		t.Fatal("abandoning forgot the membership, which is where the scripts come from")
+		f.Abandon("the other side never arrived")
+		if f.State() != Aborted {
+			t.Fatalf("a %v table would not abandon: %v", state, f.State())
+		}
+		if f.Reason() == "" {
+			t.Fatalf("abandoned a %v table with no reason recorded", state)
+		}
+		if f.canonical == nil {
+			t.Fatalf("abandoning a %v table forgot the membership, which is where the scripts come from", state)
+		}
 	}
 }

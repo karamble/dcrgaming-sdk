@@ -71,5 +71,10 @@ dcrpulse, under Gaming then Recovery, once the timelock matures. That covers a
 stake at a table that never paid out and an admission bond at a table that never
 formed. The game has no part in it.
 
+A seated table that is not fully funded by `membership.FundingDeadline(terms)`
+is marked recovery-only and its formation abandoned. The membership is kept, so
+every seat's refund script stays derivable; the money still comes back the same
+way, after `Terms.CSVBlocks`.
+
 The two deposit purposes are `seatbond` and `stake`. There is no table bond and
 no forfeitable bond; terms asking for one are refused.
