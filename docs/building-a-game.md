@@ -341,6 +341,10 @@ fake.SetVerdict(bridgetest.Hold, "")    // a person has not decided yet
 fake.SetVerdict(bridgetest.Refuse, "over the cap")
 ```
 
+`example/` is a whole game wired to one of these - three methods, one `Open`,
+and nothing else. `go run ./example` from the module root. It is built by CI, so
+if the short path ever stops being short, the example says so first.
+
 
 
 ## The things you must not change

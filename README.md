@@ -21,6 +21,19 @@ Building a game on it? Start with
 **[docs/building-a-game.md](docs/building-a-game.md)** - what you write, what you
 do not, and the one failure mode that costs money.
 
+A game implements three methods and opens a runtime:
+
+```go
+rt, err := runtime.Open(runtime.Config{
+	Rules: game, Bridge: bridge, Identity: seed, Dir: dir,
+	SeatTags: identity.SeatTags{ /* yours, frozen once chosen */ },
+})
+go rt.Run(ctx)
+```
+
+`example/` is that, complete and runnable against a bridge that exists only in
+the process: `go run ./example`. `make check` runs the tests, vet and gofmt.
+
 ## Reading it
 
 - `pkg/runtime` - the lifecycle a game plugs into. It owns the loop; a game
