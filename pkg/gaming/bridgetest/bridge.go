@@ -46,6 +46,7 @@ import (
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 
+	"github.com/karamble/dcrgaming-sdk/pkg/finance"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/gamingpb"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/transport"
 )
@@ -81,6 +82,9 @@ type Options struct {
 	Params stdaddr.AddressParams
 	// Height is the fake chain's starting tip.
 	Height int64
+	// Fees are the payout fee rules, which a real bridge takes from its
+	// wallet. A game test that settles a table supplies them.
+	Fees finance.FeeRules
 }
 
 // Bridge is an in-process stand-in for a dcrpulse gaming bridge.

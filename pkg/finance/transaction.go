@@ -80,6 +80,12 @@ func RefundWitness(tx *wire.MsgTx, index int, input Input, signature []byte) ([]
 	if err := VerifySignature(tx, index, input, input.Terms.Recovery, signature); err != nil {
 		return nil, err
 	}
+	return refundScript(input, signature)
+}
+
+// refundScript is the recovery signature script for signature, which
+// RefundWitness has verified or RefundSize has sized.
+func refundScript(input Input, signature []byte) ([]byte, error) {
 	script, err := input.Terms.Script()
 	if err != nil {
 		return nil, err
@@ -89,6 +95,21 @@ func RefundWitness(tx *wire.MsgTx, index int, input Input, signature []byte) ([]
 		b.AddOp(txscript.OP_FALSE)
 	}
 	return b.AddData(script).Script()
+}
+
+// RefundSize is the serialized size of the refund of input to destination once
+// signed, measured with the largest DER signature RefundWitness can carry. The
+// fee does not change the size, so the caller prices the refund from it.
+func RefundSize(input Input, destination []byte) (int, error) {
+	tx, err := Refund(input, destination, 1)
+	if err != nil {
+		return 0, err
+	}
+	tx.TxIn[0].SignatureScript, err = refundScript(input, make([]byte, 72))
+	if err != nil {
+		return 0, err
+	}
+	return tx.SerializeSize(), nil
 }
 
 // SettlementWitness requires a valid signature for every canonical member.

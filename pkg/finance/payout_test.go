@@ -16,6 +16,12 @@ import (
 	"github.com/decred/dcrd/wire"
 )
 
+// testFeeRules stand in for the relay rules a bridge takes from its wallet.
+var testFeeRules = FeeRules{
+	Fee:  func(size int) int64 { return 10 * int64(size) },
+	Dust: func(atoms int64, _ []byte) bool { return atoms < 6_000 },
+}
+
 func payoutFixture(t *testing.T) (Payout, map[string]string) {
 	t.Helper()
 	first, keys := fixture(t, "stake")
@@ -36,7 +42,7 @@ func payoutFixture(t *testing.T) (Payout, map[string]string) {
 
 func TestPayoutCanonicalOrdering(t *testing.T) {
 	p, destinations := payoutFixture(t)
-	expected, err := BuildPayout(p, destinations, chaincfg.SimNetParams())
+	expected, err := BuildPayout(p, destinations, chaincfg.SimNetParams(), testFeeRules)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +51,7 @@ func TestPayoutCanonicalOrdering(t *testing.T) {
 	// differing digit. Uppercase sorting previously reversed their order.
 	p.Inputs[1].Terms.Recovery = strings.ToUpper(original)
 	p.Inputs[0], p.Inputs[1] = p.Inputs[1], p.Inputs[0]
-	actual, err := BuildPayout(p, destinations, chaincfg.SimNetParams())
+	actual, err := BuildPayout(p, destinations, chaincfg.SimNetParams(), testFeeRules)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +94,7 @@ func TestPayoutRejectsInvalidProposals(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			p, destinations := payoutFixture(t)
 			alter(&p, destinations)
-			if _, err := BuildPayout(p, destinations, chaincfg.SimNetParams()); err == nil {
+			if _, err := BuildPayout(p, destinations, chaincfg.SimNetParams(), testFeeRules); err == nil {
 				t.Fatal("invalid proposal accepted")
 			}
 		})
@@ -97,11 +103,11 @@ func TestPayoutRejectsInvalidProposals(t *testing.T) {
 
 func TestPayoutFeeIsBridgeDerived(t *testing.T) {
 	p, destinations := payoutFixture(t)
-	built, err := BuildPayout(p, destinations, chaincfg.SimNetParams())
+	built, err := BuildPayout(p, destinations, chaincfg.SimNetParams(), testFeeRules)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if built.FeeAtoms != DefaultRelayFeeAtomsPerKB*int64(built.Size)/1000 || built.FeeAtoms <= 0 {
+	if built.FeeAtoms != testFeeRules.Fee(built.Size) || built.FeeAtoms <= 0 {
 		t.Fatalf("fee %d does not match worst-case size %d", built.FeeAtoms, built.Size)
 	}
 	if len(built.Payments) != 1 || built.Payments[0].Atoms != 2_000_000-built.FeeAtoms || built.Transaction.TxOut[0].Value != built.Payments[0].Atoms {
@@ -148,11 +154,11 @@ func TestPayoutFeeCoversEverySupportedRosterSize(t *testing.T) {
 				proposal.Inputs = append(proposal.Inputs, Input{Terms: terms, Outpoint: wire.OutPoint{Hash: hash}})
 			}
 			proposal.Payments = []Payment{{Key: members[0], Atoms: int64(count) * 100_000_000}}
-			built, err := BuildPayout(proposal, destinations, chaincfg.SimNetParams())
+			built, err := BuildPayout(proposal, destinations, chaincfg.SimNetParams(), testFeeRules)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if built.FeeAtoms != DefaultRelayFeeAtomsPerKB*int64(built.Size)/1000 {
+			if built.FeeAtoms != testFeeRules.Fee(built.Size) {
 				t.Fatalf("fee %d does not cover estimated size %d", built.FeeAtoms, built.Size)
 			}
 			for i, input := range built.Inputs {
@@ -176,5 +182,14 @@ func TestPayoutFeeCoversEverySupportedRosterSize(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func TestPayoutRequiresFeeRules(t *testing.T) {
+	p, destinations := payoutFixture(t)
+	for _, rules := range []FeeRules{{}, {Fee: testFeeRules.Fee}, {Dust: testFeeRules.Dust}} {
+		if _, err := BuildPayout(p, destinations, chaincfg.SimNetParams(), rules); err == nil {
+			t.Fatal("payout built without complete fee rules")
+		}
 	}
 }

@@ -11,6 +11,7 @@ import (
 
 	"github.com/decred/dcrd/chaincfg/v3"
 
+	"github.com/karamble/dcrgaming-sdk/pkg/finance"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/bridgetest"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/connect"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/gamingpb"
@@ -73,11 +74,17 @@ type wirePair struct {
 	sid      string
 }
 
+// testFeeRules stand in for the relay rules a real bridge takes from its wallet.
+var testFeeRules = finance.FeeRules{
+	Fee:  func(size int) int64 { return 10 * int64(size) },
+	Dust: func(atoms int64, _ []byte) bool { return atoms < 6_000 },
+}
+
 func seatedWirePair(t *testing.T, second Rules) wirePair {
 	t.Helper()
 	fake := bridgetest.New(bridgetest.Options{
 		Game: "battleships", Network: "mainnet",
-		Params: chaincfg.TestNet3Params(), Height: 700,
+		Params: chaincfg.TestNet3Params(), Height: 700, Fees: testFeeRules,
 	})
 	srv, err := fake.Serve("seat0", "seat1")
 	if err != nil {

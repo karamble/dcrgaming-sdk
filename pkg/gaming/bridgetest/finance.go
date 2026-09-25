@@ -149,7 +149,7 @@ func (b *Bridge) ProposePayout(ctx context.Context, req *gamingpb.ProposePayoutR
 		}
 		p.Payments = append(p.Payments, finance.Payment{Key: pay.OwnerKey, Atoms: pay.AmountAtoms})
 	}
-	built, err := finance.BuildPayout(p, destinations, b.opts.Params)
+	built, err := finance.BuildPayout(p, destinations, b.opts.Params, b.opts.Fees)
 	if err != nil {
 		return nil, err
 	}

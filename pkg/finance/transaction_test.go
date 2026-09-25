@@ -162,3 +162,29 @@ func TestMaximumRosterFitsConsensus(t *testing.T) {
 		t.Fatal("oversized script")
 	}
 }
+
+// RefundSize is never smaller than the signed refund and at most the one byte a
+// shorter DER signature saves, whatever the fee.
+func TestRefundSizeCoversTheSignedRefund(t *testing.T) {
+	pay := make([]byte, 25)
+	for _, kind := range []string{"seatbond", "stake", "tablebond"} {
+		input, keys := fixture(t, kind)
+		size, err := RefundSize(input, pay)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, fee := range []int64{1, 2_590, 99_999} {
+			tx, err := Refund(input, pay, fee)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tx.TxIn[0].SignatureScript, err = RefundWitness(tx, 0, input, sign(t, tx, input, keys[1]))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if signed := tx.SerializeSize(); size < signed || size > signed+2 {
+				t.Errorf("%s fee %d: RefundSize %d, signed %d", kind, fee, size, signed)
+			}
+		}
+	}
+}

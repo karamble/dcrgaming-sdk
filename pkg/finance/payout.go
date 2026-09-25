@@ -23,10 +23,15 @@ type Payout struct {
 	Payments []Payment `json:"payments"`
 }
 
-// DefaultRelayFeeAtomsPerKB is the financial protocol's deterministic relay
-// fee. Every bridge independently derives the same fee from the worst-case
-// signed transaction size; games cannot select or inflate it.
-const DefaultRelayFeeAtomsPerKB int64 = 10_000
+// FeeRules are the network fee and dust rules a payout is built with. The
+// bridge supplies its wallet's relay rules, so every bridge derives the same fee
+// from the worst-case signed size; games cannot select or inflate it.
+type FeeRules struct {
+	// Fee is the fee for a transaction of the given serialized size.
+	Fee func(size int) int64
+	// Dust reports whether an output of atoms paying to script is dust.
+	Dust func(atoms int64, script []byte) bool
+}
 
 // BuiltPayout is the exact bridge-derived transaction and accounting presented
 // to the operator. Payments are the net on-chain outputs after the fee.
@@ -38,11 +43,14 @@ type BuiltPayout struct {
 	Size        int
 }
 
-// BuildPayout canonicalizes ordering, applies the protocol fee and constructs
-// the only transaction the operator may approve. The caller still verifies the
+// BuildPayout canonicalizes ordering, applies the fee rules and constructs the
+// only transaction the operator may approve. The caller still verifies the
 // descriptor and current chain facts independently.
-func BuildPayout(p Payout, destinations map[string]string, params stdaddr.AddressParams) (BuiltPayout, error) {
+func BuildPayout(p Payout, destinations map[string]string, params stdaddr.AddressParams, rules FeeRules) (BuiltPayout, error) {
 	var empty BuiltPayout
+	if rules.Fee == nil || rules.Dust == nil {
+		return empty, fmt.Errorf("payout fee rules required")
+	}
 	if p.Table == "" || len(p.Inputs) < 2 || len(p.Inputs) > MaxMembers || len(p.Payments) == 0 || len(p.Payments) > MaxMembers {
 		return empty, fmt.Errorf("invalid payout shape")
 	}
@@ -134,7 +142,7 @@ func BuildPayout(p Payout, destinations map[string]string, params stdaddr.Addres
 		tx.TxIn[i].SignatureScript = witness
 	}
 	size := tx.SerializeSize()
-	fee := DefaultRelayFeeAtomsPerKB * int64(size) / 1000
+	fee := rules.Fee(size)
 	if fee <= 0 || fee > total {
 		return empty, fmt.Errorf("invalid bridge-derived payout fee")
 	}
@@ -149,17 +157,10 @@ func BuildPayout(p Payout, destinations map[string]string, params stdaddr.Addres
 			deduction += remainder
 		}
 		payments[i].Atoms -= deduction
-		if payments[i].Atoms <= 0 || dustPayment(payments[i].Atoms, tx.TxOut[i].PkScript) {
+		if payments[i].Atoms <= 0 || rules.Dust(payments[i].Atoms, tx.TxOut[i].PkScript) {
 			return empty, fmt.Errorf("payout output cannot cover bridge-derived fee")
 		}
 		tx.TxOut[i].Value = payments[i].Atoms
 	}
 	return BuiltPayout{Transaction: tx, Inputs: inputs, Payments: payments, FeeAtoms: fee, Size: size}, nil
-}
-
-func dustPayment(atoms int64, script []byte) bool {
-	// Matches the standard default-relay dust calculation for a compressed
-	// P2PKH redeem input. It deliberately uses the protocol relay fee above.
-	size := 8 + 2 + wire.VarIntSerializeSize(uint64(len(script))) + len(script) + 165
-	return atoms*1000/(3*int64(size)) < DefaultRelayFeeAtomsPerKB
 }
