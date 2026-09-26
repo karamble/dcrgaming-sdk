@@ -42,7 +42,7 @@ jobs:
         run: |
           ts=$(go list -m -f '{{.Version}}' github.com/decred/dcrd/txscript/v4)
           w=$(go list -m -f '{{.Version}}' github.com/decred/dcrd/wire)
-          if [ "$ts" != "v4.1.1" ] || [ "$w" != "v1.7.0" ]; then
+          if [ "$ts" != "v4.1.2" ] || [ "$w" != "v1.7.2" ]; then
             echo "Pinned versions moved: txscript/v4 $ts, wire $w" >&2
             exit 1
           fi

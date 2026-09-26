@@ -96,7 +96,7 @@ under live coin.
   driver: once a driver imports schema, that is an import cycle.
 - `escrow.MaxMembers = 13` is an escrow-script fact - the redeem-script push
   limit, not a seat count anybody chose - inherited by every game.
-- `txscript/v4 v4.1.1` and `wire v1.7.0` are pinned in go.mod and checked
+- `txscript/v4 v4.1.2` and `wire v1.7.2` are pinned in go.mod and checked
   in CI; the escrow scripts build on these exact versions and a bump
   changes bytes guarding live mainnet bonds.
 
