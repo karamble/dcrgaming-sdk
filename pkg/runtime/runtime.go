@@ -136,6 +136,9 @@ type table struct {
 
 	recoveryOnly   bool
 	recoveryReason string
+
+	// rosterGiven is set once the bridge has this table's seated roster.
+	rosterGiven bool
 }
 
 // staked is one seat's stake on the chain.

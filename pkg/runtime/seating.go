@@ -629,3 +629,48 @@ func (r *Runtime) say(ctx context.Context, t *table, what string, f func(context
 		r.log.Warnf("table %s: saying %s: %v", t.match, what, err)
 	}
 }
+
+// giveRoster hands the bridge a seated table's signed joins and commits, once,
+// so its financial roster admits only the players who hold a seat. It is a
+// local call to the bridge, never a peer message; a failure is tried again on
+// the next tick.
+func (r *Runtime) giveRoster(ctx context.Context, t *table) {
+	f := t.formation()
+	if f == nil || !f.Seated() {
+		return
+	}
+	r.mu.Lock()
+	given := t.rosterGiven
+	r.mu.Unlock()
+	if given {
+		return
+	}
+	if err := r.bridge.BindRoster(ctx, rosterRequest(f.Terms(), f.Joins(), f.Commits())); err != nil {
+		r.log.Debugf("table %s: roster not given to the bridge yet: %v", t.match, err)
+		return
+	}
+	r.mu.Lock()
+	t.rosterGiven = true
+	r.mu.Unlock()
+	r.keep(t)
+}
+
+// rosterRequest is the wire form of a seated formation.
+func rosterRequest(terms membership.Terms, joins []*membership.Join, commits []*membership.Commit) *gamingpb.BindRosterRequest {
+	req := &gamingpb.BindRosterRequest{Terms: &gamingpb.RosterTerms{
+		Game: terms.Game, GameVersion: int32(terms.GameVer), Sid: terms.SID,
+		BuyinAtoms: terms.BuyInAtoms, Seats: terms.Seats, CsvBlocks: terms.CSVBlocks,
+		Until: terms.Until, BondAtoms: terms.BondAtoms, BondLockBlocks: terms.BondLockBlocks,
+		AccuseFeeAtoms: terms.AccuseFeeAtoms, ForfeitBondAtoms: terms.ForfeitBondAtoms,
+	}}
+	for _, j := range joins {
+		req.Joins = append(req.Joins, &gamingpb.SignedJoin{
+			Key: j.Key, LogKey: j.LogKey, Sig: j.Sig,
+			BondOutpoint: j.Bond.Outpoint, BondScript: j.Bond.Script, BondPop: j.Bond.PoP,
+		})
+	}
+	for _, c := range commits {
+		req.Commits = append(req.Commits, &gamingpb.SignedCommit{Roster: c.Roster[:], Signer: c.Signer, Sig: c.Sig})
+	}
+	return req
+}

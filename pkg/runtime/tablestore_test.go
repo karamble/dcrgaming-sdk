@@ -79,6 +79,7 @@ func TestASeatedTableComesBackAfterARestart(t *testing.T) {
 	// Where the money went.
 	rt.mu.Lock()
 	before.funded = map[uint32]staked{0: {outpoint: bondOutpoint, atoms: 5_000_000}}
+	before.rosterGiven = true
 	rt.mu.Unlock()
 	rt.keep(before)
 
@@ -117,6 +118,9 @@ func TestASeatedTableComesBackAfterARestart(t *testing.T) {
 	}
 	if out, atoms, ok := again.Funded(sid, 0); !ok || out != bondOutpoint || atoms != 5_000_000 {
 		t.Fatalf("the stake came back as %q/%d/%v", out, atoms, ok)
+	}
+	if !after.rosterGiven {
+		t.Fatal("a restart forgot the bridge already has the roster")
 	}
 }
 

@@ -57,6 +57,8 @@ type TableRecord struct {
 	// why a table that would bind to a different roster is refused.
 	Bound  bool   `json:"bound,omitempty"`
 	Roster string `json:"roster,omitempty"`
+	// RosterGiven records that the bridge has the seated roster (BindRoster).
+	RosterGiven bool `json:"rosterGiven,omitempty"`
 
 	Aborted bool   `json:"aborted,omitempty"`
 	Reason  string `json:"reason,omitempty"`
@@ -119,7 +121,7 @@ func (r *Runtime) snapshot(t *table) TableRecord {
 
 // snapshotLocked renders a table as it stands. Caller holds r.mu.
 func (r *Runtime) snapshotLocked(t *table) TableRecord {
-	rec := TableRecord{Version: 2, BridgePayout: t.bridgePayout, PayoutID: t.payoutID, BridgeKey: t.bridgeKey, Match: t.match, GCID: t.gcID, Terms: t.terms, RecoveryOnly: t.recoveryOnly, RecoveryReason: t.recoveryReason}
+	rec := TableRecord{Version: 2, BridgePayout: t.bridgePayout, PayoutID: t.payoutID, BridgeKey: t.bridgeKey, Match: t.match, GCID: t.gcID, Terms: t.terms, RecoveryOnly: t.recoveryOnly, RecoveryReason: t.recoveryReason, RosterGiven: t.rosterGiven}
 	if t.formation() == nil {
 		// Accepted but not yet joined: the terms and whatever its seat
 		// bond has cost so far, which is the whole of what it knows.
@@ -282,7 +284,7 @@ func (r *Runtime) resume(rec TableRecord) error {
 	// The table first, because a per-table seat bond is the table's and the
 	// credentials cannot be built without knowing where it is.
 	t := &table{
-		match: rec.Match, gcID: rec.GCID, terms: rec.Terms, bridgeKey: rec.BridgeKey, payoutID: rec.PayoutID, bridgePayout: rec.BridgePayout, recoveryOnly: rec.RecoveryOnly || rec.Aborted, recoveryReason: rec.RecoveryReason,
+		match: rec.Match, gcID: rec.GCID, terms: rec.Terms, bridgeKey: rec.BridgeKey, payoutID: rec.PayoutID, bridgePayout: rec.BridgePayout, recoveryOnly: rec.RecoveryOnly || rec.Aborted, recoveryReason: rec.RecoveryReason, rosterGiven: rec.RosterGiven,
 		seatBond: staked{outpoint: rec.SeatBond.Outpoint, atoms: rec.SeatBond.Atoms},
 		funded:   stakedOf(rec.Funded),
 		payouts:  map[uint32][]byte{},

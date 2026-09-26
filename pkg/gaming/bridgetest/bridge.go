@@ -114,6 +114,9 @@ type Bridge struct {
 	replies []*gamingpb.RespondRequest
 	// frames is every frame a game has put on this bridge, in order.
 	frames []*gamingpb.Frame
+
+	// rosters is every seated roster a game has handed over, in order.
+	rosters []*gamingpb.BindRosterRequest
 	// asks is where each subscriber's operator requests go.
 	asks map[string]chan *gamingpb.BridgeRequest
 
@@ -548,4 +551,20 @@ func callerCN(ctx context.Context) string {
 		return tlsInfo.State.PeerCertificates[0].Subject.CommonName
 	}
 	return ""
+}
+
+// BindRoster records a seated roster. The real bridge verifies it and admits
+// only the seats' financial keys; this one only keeps it for the test to read.
+func (b *Bridge) BindRoster(_ context.Context, req *gamingpb.BindRosterRequest) (*gamingpb.BindRosterReply, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.rosters = append(b.rosters, req)
+	return &gamingpb.BindRosterReply{}, nil
+}
+
+// Rosters is every seated roster handed over so far.
+func (b *Bridge) Rosters() []*gamingpb.BindRosterRequest {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]*gamingpb.BindRosterRequest(nil), b.rosters...)
 }

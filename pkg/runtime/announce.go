@@ -313,6 +313,7 @@ func (r *Runtime) tickTable(ctx context.Context, t *table, height int64) {
 	if err := r.seatIfReady(ctx, t.match); err != nil {
 		r.log.Debugf("table %s: not seated yet: %v", t.match, err)
 	}
+	r.giveRoster(ctx, t)
 	r.lapseIfUnfunded(t, height)
 }
 

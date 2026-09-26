@@ -18,6 +18,7 @@ import (
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/transport"
 	"github.com/karamble/dcrgaming-sdk/pkg/gaming/wire"
 	"github.com/karamble/dcrgaming-sdk/pkg/identity"
+	"github.com/karamble/dcrgaming-sdk/pkg/membership"
 	"github.com/karamble/dcrgaming-sdk/pkg/spend"
 )
 
@@ -395,4 +396,47 @@ func TestRunSeatsATableWithoutTheGameTicking(t *testing.T) {
 		_, b := two.Seats(sid)
 		return a && b
 	})
+}
+
+// Each seat hands its bridge the seated roster once: every join and commit
+// verifies under the table's terms, and later blocks send nothing more.
+func TestSeatsGiveTheBridgeTheirRosterOnce(t *testing.T) {
+	p := seatedWirePair(t, nil)
+	waitFor(t, "both seats to give the roster", func() bool {
+		p.block()
+		return len(p.fake.Rosters()) >= 2
+	})
+	for i := 0; i < 3; i++ {
+		p.block()
+	}
+	rosters := p.fake.Rosters()
+	if len(rosters) != 2 {
+		t.Fatalf("bridge got %d rosters, want one per seat", len(rosters))
+	}
+	for _, r := range rosters {
+		rt := r.GetTerms()
+		terms := membership.Terms{
+			Game: rt.GetGame(), GameVer: int(rt.GetGameVersion()), SID: rt.GetSid(),
+			BuyInAtoms: rt.GetBuyinAtoms(), Seats: rt.GetSeats(), CSVBlocks: rt.GetCsvBlocks(),
+			Until: rt.GetUntil(), BondAtoms: rt.GetBondAtoms(), BondLockBlocks: rt.GetBondLockBlocks(),
+			AccuseFeeAtoms: rt.GetAccuseFeeAtoms(), ForfeitBondAtoms: rt.GetForfeitBondAtoms(),
+		}
+		if len(r.GetJoins()) != 2 || len(r.GetCommits()) != 2 {
+			t.Fatalf("roster has %d joins and %d commits", len(r.GetJoins()), len(r.GetCommits()))
+		}
+		for _, j := range r.GetJoins() {
+			join := &membership.Join{Key: j.GetKey(), LogKey: j.GetLogKey(), Sig: j.GetSig(),
+				Bond: membership.Bond{Outpoint: j.GetBondOutpoint(), Script: j.GetBondScript(), PoP: j.GetBondPop()}}
+			if err := join.Verify(terms); err != nil {
+				t.Fatalf("join does not verify: %v", err)
+			}
+		}
+		for _, c := range r.GetCommits() {
+			commit := &membership.Commit{Signer: c.GetSigner(), Sig: c.GetSig()}
+			copy(commit.Roster[:], c.GetRoster())
+			if err := commit.Verify(terms); err != nil {
+				t.Fatalf("commit does not verify: %v", err)
+			}
+		}
+	}
 }

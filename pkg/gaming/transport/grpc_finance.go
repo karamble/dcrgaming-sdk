@@ -58,3 +58,12 @@ func (c *Bridge) FinancialState(ctx context.Context, sid string) (*gamingpb.Fina
 	}
 	return reply, nil
 }
+
+// BindRoster gives the bridge a seated table's signed joins and commits, so it
+// admits only seated players to its financial roster.
+func (c *Bridge) BindRoster(ctx context.Context, req *gamingpb.BindRosterRequest) error {
+	if _, err := c.rpc.BindRoster(ctx, req); err != nil {
+		return hostErr("bind the seated roster", err)
+	}
+	return nil
+}
