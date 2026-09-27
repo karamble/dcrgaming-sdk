@@ -71,10 +71,12 @@ under live coin.
   baked into every gRPC `:path` a live bridge routes on, so a game and the
   bridge it dials must share it.
 - The descriptor's recorded source path is the bare `gaming_bridge.proto`.
-  No generator ships here and none may be added: dcrpulse is the generator
-  of record, and any regen must keep `--proto_path` pointed at the gamingpb
-  directory itself or the descriptor bytes change. The toolchain of record
-  pins `protoc-gen-go v1.36.11` and `protoc-gen-go-grpc v1.6.2`.
+  This module is the generator of record: `make proto` regenerates the stubs
+  with the pinned `protoc-gen-go v1.36.11` and `protoc-gen-go-grpc v1.6.2`,
+  and keeps `--proto_path` pointed at the gamingpb directory itself, since any
+  other path changes the descriptor bytes. The contract's `go_package` still
+  names dcrpulse's old path; it is frozen with the contract's hash and changes
+  nothing, because the stubs are generated source-relative.
 - A binary links this module's gamingpb OR a vendored copy, never both.
   The descriptor registers at init and protobuf's registry policy is panic
   on conflict, so double registration is a crash before a single test runs.

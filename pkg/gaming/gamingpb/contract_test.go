@@ -10,29 +10,28 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// contractSHA256 is the bridge contract this game speaks, byte for byte.
+// contractSHA256 is the bridge contract, byte for byte.
 //
-// dcrpulse generates the stubs and pins its own copy of the contract to the
-// same number. That is the whole point of pinning it in every repo that
-// carries a copy: the wire is one artifact, and a copy that drifted would
-// still compile on both sides and still generate stubs, then fail at a live
-// table with a field nobody sent.
+// This package is its only copy: games and the bridge both link it. A game and
+// a bridge built from different versions of it still compile, then fail at a
+// live table with a field nobody sent, so changing the contract has to be a
+// deliberate act with a visible diff rather than something that happens on the
+// way past. Updating this hash is how that intent is stated.
 //
-// Updating it is a deliberate act on every side at once. If this test fails,
-// the question is not "what is the new hash" but "which repo changed the wire,
-// and has every other copy been given the same change".
+// If this fails and the change was meant: regenerate with `make proto`, check
+// the method set below still says what you want, paste the new hash in, and
+// rebuild every game and bridge.
 const contractSHA256 = "c117e6c3dae60c7548dd878075c8041306f6e2e71ef4f19e0155a4fd9ab9ad9d"
 
-func TestTheWireContractMatchesTheBridge(t *testing.T) {
+func TestTheWireContractHasNotDrifted(t *testing.T) {
 	raw, err := os.ReadFile("gaming_bridge.proto")
 	if err != nil {
 		t.Fatalf("read the contract: %v", err)
 	}
 	if sum := sha256.Sum256(raw); hex.EncodeToString(sum[:]) != contractSHA256 {
-		t.Fatalf("the contract in this repo is not the one dcrpulse serves.\n"+
-			"  here: %s\n  bridge: %s\n"+
-			"Copy dcrpulse's dashboard/internal/gamingpb/gaming_bridge.proto over this one and "+
-			"regenerate, or take the change back to dcrpulse first - do not edit the hash.",
+		t.Fatalf("the wire contract changed:\n  now %s\n  was %s\n"+
+			"games and bridges built from the old one will not agree with it; "+
+			"update the hash only if that is what you meant",
 			hex.EncodeToString(sum[:]), contractSHA256)
 	}
 }
