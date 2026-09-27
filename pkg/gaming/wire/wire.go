@@ -61,8 +61,10 @@ var (
 	// partRE matches a whole message body that is one frame. Anchoring is
 	// what keeps a human who mentions --gaming[ in conversation from having
 	// their message silently swallowed, and the payload alphabet excludes
-	// brackets so a body cannot smuggle a second tag past the match.
-	partRE = regexp.MustCompile(`^--gaming\[([^\]]*)\]--([A-Za-z0-9+/=\s]*)$`)
+	// brackets so a body cannot smuggle a second tag past the match. It also
+	// excludes whitespace: no encoder writes any, and prose after a header
+	// whose letters happen to be base64 must stay a chat message.
+	partRE = regexp.MustCompile(`^--gaming\[([^\]]*)\]--([A-Za-z0-9+/=]*)$`)
 
 	sidRE  = regexp.MustCompile(`^[0-9a-f]{1,32}$`)
 	midRE  = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -182,7 +184,7 @@ func Parse(text string) (*Part, bool) {
 		return nil, false
 	}
 
-	chunk, err := base64.StdEncoding.DecodeString(strings.Join(strings.Fields(m[2]), ""))
+	chunk, err := base64.StdEncoding.DecodeString(m[2])
 	if err != nil || len(chunk) == 0 {
 		return nil, false
 	}

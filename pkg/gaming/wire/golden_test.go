@@ -40,7 +40,7 @@ func TestTheEmitterOutputIsPinned(t *testing.T) {
 // The frame regex is copied into brclientd and dcrpulse; those copies are
 // found by eye, so this pin is the alarm that says go look at them.
 func TestTheFrameRegexSourcesArePinned(t *testing.T) {
-	if got, want := partRE.String(), `^--gaming\[([^\]]*)\]--([A-Za-z0-9+/=\s]*)$`; got != want {
+	if got, want := partRE.String(), `^--gaming\[([^\]]*)\]--([A-Za-z0-9+/=]*)$`; got != want {
 		t.Fatalf("partRE is %q, want the pinned %q - the same source is copied into brclientd and dcrpulse", got, want)
 	}
 	if got, want := sidRE.String(), `^[0-9a-f]{1,32}$`; got != want {

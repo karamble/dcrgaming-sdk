@@ -120,6 +120,9 @@ func TestParseLeavesChatAlone(t *testing.T) {
 		"--gaming[v=2,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1,exp=0]--",
 		// Payload that is not base64.
 		"--gaming[v=2,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1,exp=0]--not base64 here",
+		// Prose whose letters join to valid base64 is still prose.
+		"--gaming[v=2,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1,exp=0]--nice hand",
+		"--gaming[v=2,game=poker,gv=1,sid=ab,mid=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc,seq=1/1,exp=0]--QUJD QUJD",
 	} {
 		if _, ok := Parse(text); ok {
 			t.Errorf("ordinary text parsed as a frame: %q", text)
