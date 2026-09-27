@@ -258,9 +258,37 @@ func (b *Bridge) FinancialState(ctx context.Context, req *gamingpb.FinancialStat
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	owner := callerCN(ctx)
-	reply := &gamingpb.FinancialStateReply{Sid: req.Sid}
+	if held, ok := b.heldDeposits[owner+"\x00"+req.Sid]; ok {
+		return held, nil
+	}
+	return b.financialStateLocked(owner, req.Sid), nil
+}
+
+// HoldDeposits freezes what FinancialState reports at its current answers, as
+// a bridge whose ledger has not yet observed the chain would, until it is
+// called with false.
+func (b *Bridge) HoldDeposits(hold bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.heldDeposits = nil
+	if !hold {
+		return
+	}
+	b.heldDeposits = map[string]*gamingpb.FinancialStateReply{}
+	for _, dep := range b.deposits {
+		key := dep.Owner + "\x00" + dep.Terms.Table
+		if _, ok := b.heldDeposits[key]; !ok {
+			b.heldDeposits[key] = b.financialStateLocked(dep.Owner, dep.Terms.Table)
+		}
+	}
+}
+
+// financialStateLocked derives an owner's deposits for one table from the fake
+// chain. Caller holds b.mu.
+func (b *Bridge) financialStateLocked(owner, sid string) *gamingpb.FinancialStateReply {
+	reply := &gamingpb.FinancialStateReply{Sid: sid}
 	for id, dep := range b.deposits {
-		if dep.Owner != owner || dep.Terms.Table != req.Sid {
+		if dep.Owner != owner || dep.Terms.Table != sid {
 			continue
 		}
 		state, outpoint := "prepared", ""
@@ -279,5 +307,5 @@ func (b *Bridge) FinancialState(ctx context.Context, req *gamingpb.FinancialStat
 		}
 		reply.Deposits = append(reply.Deposits, &gamingpb.DepositStatus{Id: id, Kind: dep.Terms.Kind, State: state, Outpoint: outpoint, AmountAtoms: dep.Terms.Atoms, LockBlocks: dep.Terms.LockBlocks, Confirmations: confirmations})
 	}
-	return reply, nil
+	return reply
 }

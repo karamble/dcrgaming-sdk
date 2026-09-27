@@ -119,6 +119,9 @@ type Bridge struct {
 	rosters []*gamingpb.BindRosterRequest
 	// asks is where each subscriber's operator requests go.
 	asks map[string]chan *gamingpb.BridgeRequest
+	// heldDeposits, while set, is what FinancialState answers instead of the
+	// chain: a ledger that has not yet observed a spend.
+	heldDeposits map[string]*gamingpb.FinancialStateReply
 
 	unreachable       atomic.Bool
 	framesUnavailable atomic.Bool
