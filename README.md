@@ -13,9 +13,10 @@ What lives here is exactly the part that does not care which game is being
 played: the escrow scripts and their proofs of possession, the forfeit keys
 that make equivocation self-punishing, the membership protocol that forms a
 roster and pins its terms, the tamper-evident game log, the message schema
-and its wire framing, and the gRPC proto plus transport a game uses to reach
-a dcrpulse gaming bridge. The referee, the cards and everything else that
-knows the rules of a particular game stays with that game.
+and its wire framing, the gRPC proto plus transport a game uses to reach a
+gaming bridge, and the bridge itself, which a wallet app such as dcrpulse
+hosts. The referee, the cards and everything else that knows the rules of a
+particular game stays with that game.
 
 Building a game on it? Start with
 **[docs/building-a-game.md](docs/building-a-game.md)** - what you write, what you
@@ -57,6 +58,10 @@ the process: `go run ./example`. `make check` runs the tests, vet and gofmt.
 - `pkg/gaming/wire` - how a message is framed for a Bison Relay group chat.
 - `pkg/gaming/transport` and `pkg/gaming/gamingpb` - the bridge proto and the
   client that dials one dcrpulse gaming bridge and reaches nothing else.
+- `pkg/gaming/bridge` - the bridge a wallet app hosts: it carries games' frames
+  over Bison Relay and holds the rules every game's money passes, on the host's
+  node, wallet and Bison Relay client. `listener` is the port games connect in
+  on, `funds` the bridge's ledger.
 
 Package comments carry the reasoning, and they are long deliberately.
 
@@ -98,6 +103,11 @@ under live coin.
   driver: once a driver imports schema, that is an import cycle.
 - `escrow.MaxMembers = 13` is an escrow-script fact - the redeem-script push
   limit, not a seat count anybody chose - inherited by every game.
+- The bridge's hash tags `dcrpulse/gaming/financial-key/v1` and
+  `dcrpulse/gaming-authority-backup/v1` and its stream epoch
+  `dcrpulse-gaming-inbox-v2` keep their dcrpulse names: bridges verify each
+  other's key proofs, every ledger backup carries its tag, and a changed epoch
+  replays every stored frame to every game.
 - `txscript/v4 v4.1.2` and `wire v1.7.2` are pinned in go.mod and checked
   in CI; the escrow scripts build on these exact versions and a bump
   changes bytes guarding live mainnet bonds.

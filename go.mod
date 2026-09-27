@@ -21,8 +21,13 @@ require (
 
 require (
 	decred.org/dcrwallet/v5 v5.0.2
+	github.com/decred/dcrd/certgen v1.2.0
+	github.com/decred/dcrd/dcrjson/v4 v4.2.0
 	github.com/decred/dcrd/dcrutil/v4 v4.0.3
+	github.com/decred/dcrd/rpc/jsonrpc/types/v4 v4.4.0
+	golang.org/x/net v0.55.0
 	golang.org/x/sys v0.45.0
+	golang.org/x/time v0.15.0
 )
 
 require (
@@ -35,7 +40,6 @@ require (
 	github.com/decred/dcrd/dcrec/edwards/v2 v2.0.4 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.8 // indirect
 	golang.org/x/crypto v0.51.0 // indirect
-	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	lukechampine.com/blake3 v1.3.0 // indirect
