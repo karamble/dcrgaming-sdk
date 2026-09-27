@@ -302,6 +302,7 @@ func (br *Bridge) Start(addr string) error {
 	br.gamingRequest = srv.Request
 	br.gamingState = srv.State
 	br.gamingLockTerms = srv.LockTerms
+	br.server = srv
 	// How a loss upstream of the bridge reaches the games. The bridge cannot
 	// see that kind of gap for itself, so the notification stream tells it.
 	br.SetGamingResync(srv.ResyncAll)
@@ -311,6 +312,14 @@ func (br *Bridge) Start(addr string) error {
 		}
 	}()
 	return nil
+}
+
+// Stop closes the port games connect in on and ends the financial worker. It
+// is called once, after Start.
+func (br *Bridge) Stop() {
+	if br.server != nil {
+		br.server.Stop()
+	}
 }
 
 // gamingGameLockTerms is the advertised locks for a game, or zero when there is

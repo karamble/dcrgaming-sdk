@@ -142,6 +142,9 @@ type Bridge struct {
 	// Hello, cached by the listener.
 	gamingLockTerms func(game string) (minRefund, bondLock uint32)
 
+	// server is the listener Start brought up.
+	server *listener.Server
+
 	// The staged calls a game's money passes through: the account it resolves
 	// to, the transaction built for it, the signature a person authorises, the
 	// relay that puts it on the network, and what the node says an input was.
