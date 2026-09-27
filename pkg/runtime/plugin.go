@@ -177,7 +177,8 @@ func (r *Runtime) gameState(ctx context.Context) (st *gamingpb.GameState) {
 			Seats:      snap.Record.Terms.Seats,
 			BuyinAtoms: int64(snap.Record.Terms.BuyInAtoms),
 			Until:      snap.Record.Terms.Until,
-			Over:       snap.Record.RecoveryOnly || snap.Record.Aborted,
+			// A proposed payout ends play as surely as a recovery does.
+			Over: snap.Record.RecoveryOnly || snap.Record.Aborted || snap.Record.PayoutID != "",
 		}
 		rows[match] = row
 		st.Tables = append(st.Tables, row)

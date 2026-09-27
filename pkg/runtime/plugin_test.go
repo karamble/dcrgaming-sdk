@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -419,6 +420,25 @@ func TestTheRuntimeReportsATableWithoutTheGamesHelp(t *testing.T) {
 	if row.GetSeats() == 0 || row.GetBuyinAtoms() == 0 || row.GetUntil() == 0 {
 		t.Errorf("terms missing: seats %d, buy-in %d, until %d",
 			row.GetSeats(), row.GetBuyinAtoms(), row.GetUntil())
+	}
+}
+
+// A table whose payout the bridge has taken is over, whatever phase it was in:
+// the dashboard must not keep listing it as seated.
+func TestATableIsOverOnceItsPayoutIsProposed(t *testing.T) {
+	_, rt, _ := stand(t, &silentGame{})
+	sid, err := accept(rt, invite(t, nil), testGCID)
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if rt.gameState(context.Background()).GetTables()[0].GetOver() {
+		t.Fatal("a table that has not settled reports over")
+	}
+	rt.mu.Lock()
+	rt.tables[sid].payoutID = strings.Repeat("8e", 32)
+	rt.mu.Unlock()
+	if !rt.gameState(context.Background()).GetTables()[0].GetOver() {
+		t.Fatal("a table with a proposed payout does not report over")
 	}
 }
 
