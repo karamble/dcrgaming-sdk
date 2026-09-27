@@ -58,6 +58,9 @@ func (br *Bridge) BindGamingRoster(ctx context.Context, game string, req *gaming
 	if err := store.BindSeats(scope, terms.SID, keys); err != nil {
 		return err
 	}
+	// A peer's roster commitment that arrived before the seats were bound
+	// can apply now.
+	br.retryFinancial()
 	return br.announceGamingAuthority(ctx, scope, terms.SID)
 }
 

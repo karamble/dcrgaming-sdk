@@ -6,7 +6,9 @@ package bridge
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -110,12 +112,10 @@ type confTable struct {
 func (c *confTable) players() []*confPlayer { return []*confPlayer{c.alice, c.bob} }
 
 // tick is both bridges and both games reading the chain as it stands, the
-// bridges' part being what their financial worker does every thirty seconds.
+// bridges' part being the reconcile pass their financial worker runs every
+// thirty seconds.
 func (c *confTable) tick(ctx context.Context) {
 	for _, p := range c.players() {
-		for _, ev := range p.br.financialReplay() {
-			p.br.processFinancialFrame(ctx, ev)
-		}
 		p.br.reconcileGamingFinance(ctx)
 		p.rt.Tick(ctx, c.chain.height())
 	}
@@ -137,6 +137,27 @@ func (c *confTable) waitFor(t *testing.T, ctx context.Context, what string, ceil
 		}
 		return false
 	})
+}
+
+// bound reports whether p's bridge has bound the table's seats.
+func (c *confTable) bound(ctx context.Context, p *confPlayer) bool {
+	scope, err := p.br.gamingFinancialScope(ctx, confGame)
+	if err != nil {
+		return false
+	}
+	store, err := p.br.gamingFundsStore()
+	if err != nil {
+		return false
+	}
+	peers, err := store.Participants(scope, c.sid)
+	return err == nil && len(peers) == 2
+}
+
+// waiting reports whether p's bridge holds a financial frame from sender that
+// it could not apply yet.
+func (c *confTable) waiting(p, sender *confPlayer) bool {
+	uid := hex.EncodeToString(sender.host.relay.uid[:])
+	return slices.ContainsFunc(p.br.financialReplay(), func(ev GamingFrameEvent) bool { return ev.From == uid })
 }
 
 func (c *confTable) phase(p *confPlayer) string {
@@ -173,15 +194,21 @@ func seatConfTable(t *testing.T, ctx context.Context) *confTable {
 	for _, p := range c.players() {
 		confEventually(t, "a seat bond to wait on the operator", func() bool { return p.approvePending(t, ctx) > 0 })
 	}
-	c.waitFor(t, ctx, "both seats to join", c.until, func() bool {
-		for _, p := range c.players() {
-			if ph := c.phase(p); ph == "" || ph == "admission" || ph == "joining" {
-				return false
-			}
-		}
-		return true
+	c.waitFor(t, ctx, "both seats to bind themselves to the roster", c.until, func() bool {
+		return c.phase(c.alice) == "settled" && c.phase(c.bob) == "settled"
 	})
+
+	// Alice's game seats first and hands her bridge the roster, so her
+	// bridge's roster commitment reaches bob's before his seats are bound,
+	// and is refused as early. Bob's bind has to apply it: nothing replays.
 	beacon := int64(membership.BeaconHeight(c.alice.rt.Terms(c.sid)))
+	for c.chain.height() < beacon {
+		c.chain.mine(1)
+	}
+	confEventually(t, "bob's bridge to refuse alice's commitment as early", func() bool {
+		c.alice.rt.Tick(ctx, c.chain.height())
+		return c.bound(ctx, c.alice) && c.waiting(c.bob, c.alice)
+	})
 	c.waitFor(t, ctx, "both games to seat the same table", beacon, func() bool {
 		_, a := c.alice.rt.Seats(c.sid)
 		_, b := c.bob.rt.Seats(c.sid)
@@ -242,11 +269,12 @@ func TestConformanceTwoBridgesPayOutATable(t *testing.T) {
 					funding <- err
 					return
 				}
+				// At the pace the bridge takes money requests.
 				select {
 				case <-ctx.Done():
 					funding <- ctx.Err()
 					return
-				case <-time.After(50 * time.Millisecond):
+				case <-time.After(2 * time.Second):
 				}
 			}
 		}()
@@ -272,21 +300,18 @@ func TestConformanceTwoBridgesPayOutATable(t *testing.T) {
 
 	winner, _ := c.alice.rt.Seat(c.sid)
 	outcome := runtime.Outcome{Shares: map[uint32]int64{winner: 2 * confStake}}
-	for _, p := range c.players() {
-		if err := p.rt.Settle(ctx, c.sid, outcome); err != nil {
-			t.Fatalf("propose the payout: %v", err)
-		}
+	// Alice's game proposes the payout and alice approves it before bob's
+	// game has proposed it, so her signatures reach bob's bridge early. Bob's
+	// proposal has to apply them: nothing replays.
+	if err := c.alice.rt.Settle(ctx, c.sid, outcome); err != nil {
+		t.Fatalf("alice's game proposes the payout: %v", err)
 	}
-	aliceID := c.awaitingApproval(t, ctx, c.alice)
-	bobID := c.awaitingApproval(t, ctx, c.bob)
-	if aliceID != bobID {
-		t.Fatalf("the bridges hold different payouts: %s and %s", aliceID, bobID)
-	}
-
-	if _, err := c.alice.br.ApproveGamingPayout(ctx, aliceID, []byte(c.alice.host.wallet.pass)); err != nil {
+	payoutID := c.awaitingApproval(t, ctx, c.alice)
+	if _, err := c.alice.br.ApproveGamingPayout(ctx, payoutID, []byte(c.alice.host.wallet.pass)); err != nil {
 		t.Fatalf("alice approves: %v", err)
 	}
-	payout, err := chainhash.NewHashFromStr(aliceID)
+	confEventually(t, "bob's bridge to hold alice's early signatures", func() bool { return c.waiting(c.bob, c.alice) })
+	payout, err := chainhash.NewHashFromStr(payoutID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,12 +325,18 @@ func TestConformanceTwoBridgesPayOutATable(t *testing.T) {
 		}
 	}
 
-	if _, err := c.bob.br.ApproveGamingPayout(ctx, bobID, []byte(c.bob.host.wallet.pass)); err != nil {
+	if err := c.bob.rt.Settle(ctx, c.sid, outcome); err != nil {
+		t.Fatalf("bob's game proposes the payout: %v", err)
+	}
+	if id := c.awaitingApproval(t, ctx, c.bob); id != payoutID {
+		t.Fatalf("the bridges hold different payouts: %s and %s", payoutID, id)
+	}
+	if _, err := c.bob.br.ApproveGamingPayout(ctx, payoutID, []byte(c.bob.host.wallet.pass)); err != nil {
 		t.Fatalf("bob approves: %v", err)
 	}
 	c.waitFor(t, ctx, "the payout to confirm on both bridges", c.chain.height()+10, func() bool {
 		for _, p := range c.players() {
-			st, err := p.br.GamingPayoutStatus(ctx, confGame, aliceID)
+			st, err := p.br.GamingPayoutStatus(ctx, confGame, payoutID)
 			if err != nil || st.GetState() != "confirmed" {
 				return false
 			}

@@ -403,7 +403,7 @@ func (br *Bridge) StartGamingFinancialWorker(ctx context.Context) {
 	workers.Add(2)
 	go func() {
 		defer workers.Done()
-		replay := time.NewTicker(30 * time.Second)
+		replay := time.NewTicker(br.financialReplayEvery)
 		defer replay.Stop()
 		process := func(event GamingFrameEvent) { br.processFinancialFrame(ctx, event) }
 		for _, event := range br.financialReplay() {
@@ -416,6 +416,10 @@ func (br *Bridge) StartGamingFinancialWorker(ctx context.Context) {
 			case event := <-br.gamingFinancialInbox:
 				process(event)
 			case <-replay.C:
+				for _, event := range br.financialReplay() {
+					process(event)
+				}
+			case <-br.financialRetry:
 				for _, event := range br.financialReplay() {
 					process(event)
 				}
@@ -545,6 +549,15 @@ func fundingStillWanted(store *funds.Store, op funds.Operation) bool {
 		}
 	}
 	return true
+}
+
+// retryFinancial has the worker apply again, without waiting for its next
+// replay, the financial frames it could not apply yet.
+func (br *Bridge) retryFinancial() {
+	select {
+	case br.financialRetry <- struct{}{}:
+	default:
+	}
 }
 
 // processFinancialFrame applies one stored financial frame and keeps it out of

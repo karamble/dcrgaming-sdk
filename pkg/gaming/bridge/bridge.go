@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/decred/dcrd/chaincfg/v3"
 	"github.com/decred/dcrd/wire"
@@ -81,6 +82,14 @@ type Bridge struct {
 		running bool
 	}
 	gamingFinancialInbox chan GamingFrameEvent
+
+	// financialRetry asks the financial worker to apply again, now, the
+	// frames it could not apply yet: something they waited for arrived.
+	financialRetry chan struct{}
+
+	// financialReplayEvery is how often the worker tries those frames again
+	// unasked. Settable for tests.
+	financialReplayEvery time.Duration
 
 	// gamingIndexComplained keeps the reconcile pass from saying the same
 	// thing every thirty seconds, without it going unsaid.
@@ -213,6 +222,8 @@ func New(dataDir string, host Host) *Bridge {
 		host:                 host,
 		subs:                 make(map[*gamingSubscriber]struct{}),
 		gamingFinancialInbox: make(chan GamingFrameEvent, 128),
+		financialRetry:       make(chan struct{}, 1),
+		financialReplayEvery: 30 * time.Second,
 		spendApproving:       map[string]bool{},
 		gamingAllow:          listener.NewAllowlist(),
 	}

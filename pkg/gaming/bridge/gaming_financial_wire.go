@@ -332,6 +332,9 @@ func (br *Bridge) receiveFinancialFrame(ctx context.Context, event GamingFrameEv
 			}
 		}
 		if changed {
+			// The roster just completed, so commitments refused as
+			// early can apply now.
+			br.retryFinancial()
 			return br.announceGamingAuthority(ctx, scope, part.SID)
 		}
 		return nil

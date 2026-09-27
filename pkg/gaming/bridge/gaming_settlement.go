@@ -99,6 +99,8 @@ func (br *Bridge) ProposeGamingPayout(ctx context.Context, game string, req *gam
 	if err != nil {
 		return nil, err
 	}
+	// Peers' signatures that arrived before this proposal can apply now.
+	br.retryFinancial()
 	br.GamingPresenceChanged(game)
 	return payoutStatus(p), nil
 }

@@ -83,6 +83,8 @@ func startConfBridge(t *testing.T, chain *fakeChain, name string, policy GamePol
 		}
 	}
 	br := New(t.TempDir(), h.host())
+	// No replay unasked: a frame that waits is applied by what it waited for.
+	br.financialReplayEvery = time.Hour
 	settings := GamingSettings{Enabled: true, RegisteredGames: []string{confGame}, Policies: map[string]GamePolicy{confGame: policy}}
 	if _, err := br.WriteGamingSettings(settings, true, true); err != nil {
 		t.Fatalf("register the game: %v", err)
