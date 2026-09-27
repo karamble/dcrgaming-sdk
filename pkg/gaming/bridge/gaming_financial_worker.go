@@ -364,6 +364,11 @@ func (br *Bridge) reconcileGamingDeposits(ctx context.Context, store *funds.Stor
 				_ = store.ObserveDeposit(dep.Scope, dep.ID, funds.DepositObservation{})
 				continue
 			}
+			// The node still reports an output whose spend waits in the mempool.
+			if spend := mempool[dep.Outpoint]; spend.txid != "" {
+				_ = store.ObserveDeposit(dep.Scope, dep.ID, funds.DepositObservation{SpendingTx: spend.txid})
+				continue
+			}
 			operation, known, err := br.observeGamingOperation(ctx, dep.FundingTx)
 			if err != nil || !known {
 				continue

@@ -334,6 +334,52 @@ func TestConformanceTwoBridgesPayOutATable(t *testing.T) {
 	if _, err := c.bob.br.ApproveGamingPayout(ctx, payoutID, []byte(c.bob.host.wallet.pass)); err != nil {
 		t.Fatalf("bob approves: %v", err)
 	}
+	// While the payout waits in the mempool the node still reports the
+	// stakes; each bridge says its own is being spent, and its game hears it.
+	confEventually(t, "the payout to reach the mempool", func() bool {
+		c.tick(ctx)
+		tx, err := c.chain.GetRawTransactionVerbose(ctx, payout)
+		return err == nil && tx.Confirmations == 0
+	})
+	c.tick(ctx)
+	for i, p := range c.players() {
+		name := []string{"alice", "bob"}[i]
+		state, err := p.br.GamingFinancialState(ctx, confGame, c.sid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stakes := 0
+		for _, d := range state.GetDeposits() {
+			if d.GetKind() != "stake" {
+				continue
+			}
+			stakes++
+			if d.GetState() != "spend_pending" {
+				t.Fatalf("%s's bridge reports its stake %s while the payout is in the mempool", name, d.GetState())
+			}
+		}
+		if stakes != 1 {
+			t.Fatalf("%s's bridge reports %d stakes", name, stakes)
+		}
+		snap, err := p.rt.RefreshDeposits(ctx, c.sid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		seat, _ := p.rt.Seat(c.sid)
+		own := 0
+		for _, d := range snap.Deposits {
+			if d.Purpose != "stake" || d.Seat != seat {
+				continue
+			}
+			own++
+			if d.Check != "spending" {
+				t.Fatalf("%s's game reads its stake %s while the payout is in the mempool", name, d.Check)
+			}
+		}
+		if own != 1 {
+			t.Fatalf("%s's game reads %d stakes of its own", name, own)
+		}
+	}
 	c.waitFor(t, ctx, "the payout to confirm on both bridges", c.chain.height()+10, func() bool {
 		for _, p := range c.players() {
 			st, err := p.br.GamingPayoutStatus(ctx, confGame, payoutID)

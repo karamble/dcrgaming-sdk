@@ -138,6 +138,12 @@ func (r *Runtime) RefreshDeposits(ctx context.Context, match string) (TableSnaps
 			dep.AuthorityID = bridgeDeposit.GetId()
 			dep.AuthorityState = bridgeDeposit.GetState()
 		}
+		// The bridge knows an output is being spent while the node still
+		// reports it, its spend waiting in the mempool.
+		if dep.AuthorityState == "spend_pending" {
+			dep.Check = "spending"
+			continue
+		}
 		txid, vout, err := splitOutpoint(dep.Outpoint)
 		if err != nil {
 			dep.Check = "mismatch"
@@ -155,7 +161,7 @@ func (r *Runtime) RefreshDeposits(ctx context.Context, match string) (TableSnaps
 			switch dep.AuthorityState {
 			case "spent":
 				dep.Check = "spent"
-			case "recovery_pending", "spend_pending":
+			case "recovery_pending":
 				dep.Check = "spending"
 			case "needs_attention":
 				dep.Check = "unavailable"
