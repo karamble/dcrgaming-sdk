@@ -22,6 +22,9 @@ Building a game on it? Start with
 **[docs/building-a-game.md](docs/building-a-game.md)** - what you write, what you
 do not, and the one failure mode that costs money.
 
+Hosting a bridge in a wallet app? **[docs/hosting-a-bridge.md](docs/hosting-a-bridge.md)**
+is what your app provides, what it has to do, and what it must never hand a game.
+
 A game implements three methods and opens a runtime:
 
 ```go
