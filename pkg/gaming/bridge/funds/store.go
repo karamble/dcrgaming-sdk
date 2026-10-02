@@ -16,6 +16,7 @@ import (
 
 	"github.com/decred/dcrd/txscript/v4/stdaddr"
 	"github.com/decred/dcrd/wire"
+	"github.com/karamble/dcrgaming-sdk/internal/fsync"
 	"github.com/karamble/dcrgaming-sdk/pkg/finance"
 	"golang.org/x/sys/unix"
 )
@@ -151,13 +152,7 @@ func Open(dir string) (*Store, error) {
 			writeErr = closeErr
 		}
 		if writeErr == nil {
-			directory, openErr := os.Open(dir)
-			if openErr != nil {
-				writeErr = openErr
-			} else {
-				writeErr = directory.Sync()
-				directory.Close()
-			}
+			writeErr = fsync.Dir(dir)
 		}
 		if writeErr != nil {
 			f.Close()
@@ -393,12 +388,7 @@ func RestoreBackup(dir string, raw []byte) error {
 	} else if statErr != nil {
 		return statErr
 	}
-	directory, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	return directory.Sync()
+	return fsync.Dir(dir)
 }
 func (s *Store) save(d diskState) error {
 	b, err := json.Marshal(d)
@@ -426,12 +416,7 @@ func (s *Store) save(d diskState) error {
 	if err = os.Rename(f.Name(), filepath.Join(s.dir, "authority.json")); err != nil {
 		return err
 	}
-	dir, err := os.Open(s.dir)
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
+	return fsync.Dir(s.dir)
 }
 func scopeKey(scope Scope, table string) (string, error) {
 	if scope.Game == "" || scope.Network == "" || scope.Wallet == "" {

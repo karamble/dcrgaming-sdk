@@ -2,17 +2,11 @@ package runtime
 
 import (
 	"encoding/json"
-	"os"
+
+	"github.com/karamble/dcrgaming-sdk/internal/fsync"
 )
 
-func syncDirectory(dir string) error {
-	f, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	return f.Sync()
-}
+func syncDirectory(dir string) error { return fsync.Dir(dir) }
 func cloneRecord(in TableRecord) TableRecord {
 	raw, _ := json.Marshal(in)
 	var out TableRecord

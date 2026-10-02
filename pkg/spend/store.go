@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+
+	"github.com/karamble/dcrgaming-sdk/internal/fsync"
 )
 
 // fileStore keeps the book in one JSON file, written whole.
@@ -97,12 +99,7 @@ func writeAtomic(path string, body []byte) error {
 	if err := os.Rename(tmp.Name(), path); err != nil {
 		return err
 	}
-	dir, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
+	return fsync.Dir(filepath.Dir(path))
 }
 
 // MemStore keeps a book in memory. For tests, and for a game that has genuinely

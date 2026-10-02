@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/karamble/dcrgaming-sdk/internal/fsync"
 )
 
 // writeFileSynced replaces path atomically and durably: the new content is
@@ -33,12 +35,7 @@ func writeFileSynced(path string, data []byte, perm os.FileMode) error {
 	if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
-	dir, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
+	return fsync.Dir(filepath.Dir(path))
 }
 
 // atomicWriteJSON writes data to path through a temporary file it chmods 0600,
@@ -73,12 +70,7 @@ func atomicWriteJSON(path string, data []byte) error {
 		os.Remove(tmpName)
 		return fmt.Errorf("rename: %w", err)
 	}
-	d, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("open directory: %w", err)
-	}
-	defer d.Close()
-	if err := d.Sync(); err != nil {
+	if err := fsync.Dir(dir); err != nil {
 		return fmt.Errorf("sync directory: %w", err)
 	}
 	return nil
